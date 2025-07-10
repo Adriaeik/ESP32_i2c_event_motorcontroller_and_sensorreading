@@ -217,6 +217,8 @@ bool i2c_master_device_is_available(uint8_t device_addr);
  */
 const i2c_mgr_device_config_t* i2c_master_get_device_config(uint8_t device_addr);
 
+void i2c_scan_physical_bus();
+
 #ifdef __cplusplus
 }
 #endif

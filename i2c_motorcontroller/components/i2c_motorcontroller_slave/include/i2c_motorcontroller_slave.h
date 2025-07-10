@@ -94,7 +94,7 @@ typedef struct {
  * 
  * @return ESP_OK on success, error code otherwise
  */
-esp_err_t i2c_innstall_slave_driver_cnfig(void);
+esp_err_t i2c_install_slave_driver_config(void);
 
 /**
  * @brief Deinitialize I2C slave

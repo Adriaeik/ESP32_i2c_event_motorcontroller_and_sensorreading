@@ -20,8 +20,10 @@
     "esp_timer.h": "c",
     "i2c_motorcontroller_slave.h": "c",
     "soc_caps.h": "c",
-    "task.h": "c"
+    "task.h": "c",
+    "serde_helper.h": "c",
+    "functional": "c"
   },
   "idf.flashType": "UART",
-  "idf.portWin": "COM6"
+  "idf.portWin": "COM4"
 }

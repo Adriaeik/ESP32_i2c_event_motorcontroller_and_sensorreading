@@ -302,8 +302,10 @@ static esp_err_t execute_motor_ctrl_operation(i2c_operation_t *operation)
             size_t tx_len;
             motorcontroller_pkg_t *pkg = (motorcontroller_pkg_t*)operation->motor_ctrl.pkg;
             uint16_t crc = calculate_pkg_crc(pkg);
-            
+            ESP_LOGI(TAG, "calculated crc: 0x%04X", crc);
             ret = serialize_pkg(pkg, tx_buffer, &tx_len, crc);
+            ESP_LOG_BUFFER_HEX_LEVEL(TAG, tx_buffer, tx_len, ESP_LOG_INFO);
+
             if (ret != ESP_OK) {
                 ESP_LOGE(TAG, "Failed to serialize motor controller package");
                 break;

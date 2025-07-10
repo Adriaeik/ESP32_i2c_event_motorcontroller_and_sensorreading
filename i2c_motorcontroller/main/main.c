@@ -9,7 +9,7 @@
 #include "freertos/event_groups.h"
 
 // Comment out to test as SLAVE, uncomment for MASTER
-#define TEST_AS_MASTER
+// #define TEST_AS_MASTER
 
 #ifdef TEST_AS_MASTER
 #include "i2c_motorcontroller_master.h"  // Use wrapper instead of manager
@@ -88,6 +88,8 @@ static void i2c_master_event_callback(const i2c_mgr_event_data_t *event_data, vo
             break;
     }
 }
+
+
 
 // Test motor controller functionality
 static void test_motor_controller(void)
@@ -228,6 +230,7 @@ void app_main(void) {
     ESP_LOGI_THREAD(TAG, "Motor controller master initialized successfully!");
     
     // Scan for devices
+    i2c_scan_physical_bus();
     ESP_LOGI_THREAD(TAG, "Scanning for I2C devices...");
     bool found_any = false;
     for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
@@ -266,7 +269,7 @@ void app_main(void) {
     ESP_LOGI_THREAD(TAG, "Starting I2C SLAVE test");
     
     // Install slave driver
-    esp_err_t err = i2c_innstall_slave_driver_cnfig();
+    esp_err_t err = i2c_install_slave_driver_config();
     if (err != ESP_OK) {
         ESP_LOGE_THREAD(TAG, "Slave driver install failed: %s", esp_err_to_name(err));
         return;

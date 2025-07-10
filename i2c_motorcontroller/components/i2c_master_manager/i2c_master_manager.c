@@ -234,6 +234,21 @@ static esp_err_t i2c_master_auto_configure_devices(void)
 {
     esp_err_t ret = ESP_OK;
 
+    // Add motor controller device (CRITICAL FIX)
+    i2c_mgr_device_config_t motctrl_config = {
+        .name = "Motor Controller",
+        .address = CONFIG_MOTCTRL_I2C_ADDR,  // Should match your slave address
+        .type = I2C_DEVICE_TYPE_MOTOR_CONTROLLER,
+        .speed_hz = CONFIG_I2C_MASTER_CLK_SPEED,
+        .enabled = true
+    };
+
+    ret = i2c_master_add_device(&motctrl_config);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to add motor controller device");
+        return ret;
+    }
+
 #ifdef CONFIG_LSM6DS032TR_DEVICE_ENABLED
     // Add LSM6DS032TR sensor
     i2c_mgr_device_config_t imu_config = {
@@ -296,7 +311,7 @@ static esp_err_t i2c_master_create_device_handle(const i2c_mgr_device_config_t *
         .device_address = config->address,
         .scl_speed_hz = config->speed_hz,
     };
-
+    ESP_LOGD(TAG, "Creating device handle for %s", config->name);
     esp_err_t ret = i2c_master_bus_add_device(
         s_master_ctx.bus_handle, 
         &dev_cfg, 
@@ -305,6 +320,9 @@ static esp_err_t i2c_master_create_device_handle(const i2c_mgr_device_config_t *
 
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to add device handle for %s: %s", config->name, esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(TAG, "Created device handle for %s at 0x%02X", 
+                config->name, config->address);
     }
 
     return ret;
@@ -514,4 +532,34 @@ const i2c_mgr_device_config_t* i2c_master_get_device_config(uint8_t device_addr)
         }
     }
     return NULL;
+}
+
+
+void i2c_scan_physical_bus() {
+    ESP_LOGI(TAG, "Scanning physical I2C bus...");
+    
+    for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
+        i2c_operation_t probe_op = {
+            .op_type = I2C_OP_TYPE_CUSTOM,
+            .device_addr = addr,
+            .data = NULL,
+            .data_len = 0,  // Zero-length write to probe address
+            .timeout_ms = 50
+        };
+        
+        esp_err_t ret = i2c_master_queue_operation(&probe_op);
+        if (ret == ESP_OK) {
+            EventBits_t bits = xEventGroupWaitBits(
+                s_master_ctx.event_group,
+                I2C_MASTER_OPERATION_DONE_BIT | I2C_MASTER_ERROR_BIT,
+                pdTRUE,
+                pdFALSE,
+                pdMS_TO_TICKS(100)
+            );
+            
+            if (bits & I2C_MASTER_OPERATION_DONE_BIT) {
+                ESP_LOGI(TAG, "Found device at address 0x%02X", addr);
+            }
+        }
+    }
 }
