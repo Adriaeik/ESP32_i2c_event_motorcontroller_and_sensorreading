@@ -267,7 +267,6 @@ bool i2c_motctrl_slave_is_ready(void)
 // Callback functions
 static bool i2c_slave_request_cb(i2c_slave_dev_handle_t i2c_slave, const i2c_slave_request_event_data_t *evt_data, void *arg)
 {
-    ESP_LOGI(TAG, "Request callback triggered");
     i2c_motctrl_slave_ctx_t *ctx = (i2c_motctrl_slave_ctx_t *)arg;
     i2c_slave_event_t evt = I2C_SLAVE_EVT_RESP_REQUESTED;
     BaseType_t xTaskWoken = pdFALSE;
@@ -279,7 +278,6 @@ static bool i2c_slave_request_cb(i2c_slave_dev_handle_t i2c_slave, const i2c_sla
 // FIXED receive callback for v5.4.1 API
 static bool i2c_slave_receive_cb(i2c_slave_dev_handle_t i2c_slave, const i2c_slave_rx_done_event_data_t *evt_data, void *arg)
 {
-    ESP_LOGI(TAG, "Receive callback triggered");
     i2c_motctrl_slave_ctx_t *ctx = (i2c_motctrl_slave_ctx_t *)arg;
     BaseType_t xTaskWoken = pdFALSE;
     
