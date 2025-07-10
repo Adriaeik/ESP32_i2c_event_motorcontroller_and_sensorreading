@@ -1,0 +1,31 @@
+menu "I2C Slave Motor Controller Configuration"
+
+    config MOTCTRL_SLAVE_I2C_NUM
+        int "I2C port number"
+        range 0 1
+        default 0
+        help
+            I2C port number for motor controller slave.
+
+    config MOTCTRL_SLAVE_SCL_GPIO
+        int "SCL GPIO number"
+        range 0 48
+        default 22
+        help
+            GPIO number for I2C SCL signal.
+
+    config MOTCTRL_SLAVE_SDA_GPIO  
+        int "SDA GPIO number"
+        range 0 48
+        default 21
+        help
+            GPIO number for I2C SDA signal.
+
+    config MOTCTRL_SLAVE_ADDR
+        hex "Motor controller slave I2C address"
+        range 0x08 0x77
+        default 0x42
+        help
+            I2C address of this motor controller slave device.
+
+endmenu

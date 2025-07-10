@@ -1,0 +1,17 @@
+menu "Motor Controller Master Configuration"
+
+    config MOTCTRL_I2C_ADDR
+        hex "Motor controller I2C address"
+        range 0x08 0x77
+        default 0x42
+        help
+            I2C address of the motor controller slave device.
+
+    config MOTCTRL_WAKEUP_PIN
+        int "Motor controller wake-up pin"
+        range -1 48
+        default -1
+        help
+            GPIO pin to wake up motor controller. Set to -1 to disable.
+
+endmenu
