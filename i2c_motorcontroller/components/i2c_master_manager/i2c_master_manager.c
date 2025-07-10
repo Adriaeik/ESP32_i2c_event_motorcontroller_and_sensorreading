@@ -469,17 +469,7 @@ esp_err_t i2c_master_remove_device(uint8_t device_addr)
     return ESP_ERR_NOT_FOUND;
 }
 
-esp_err_t i2c_master_motor_ctrl_get_response(motorcontroller_response_t *resp, uint32_t timeout_ms)
-{
-    i2c_operation_t operation = {
-        .op_type = I2C_OP_TYPE_MOTOR_CTRL_GET_RESP,
-        .device_addr = CONFIG_MOTCTRL_I2C_ADDR,
-        .timeout_ms = timeout_ms,
-        .motor_ctrl.resp = resp
-    };
 
-    return i2c_master_queue_operation(&operation);
-}
 
 esp_err_t i2c_master_sensor_write_reg(uint8_t device_addr, uint8_t reg_addr, const uint8_t *data, size_t len, uint32_t timeout_ms)
 {

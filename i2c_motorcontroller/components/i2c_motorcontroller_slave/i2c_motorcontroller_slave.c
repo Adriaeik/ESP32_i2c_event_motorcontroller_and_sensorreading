@@ -48,8 +48,8 @@ esp_err_t i2c_innstall_slave_driver_cnfig(void)
         .scl_io_num = CONFIG_MOTCTRL_SLAVE_SCL_GPIO,
         .sda_io_num = CONFIG_MOTCTRL_SLAVE_SDA_GPIO,
         .slave_addr = CONFIG_MOTCTRL_SLAVE_ADDR,
-        .send_buf_depth = 256,
-        .receive_buf_depth = 256,
+        .rx_buffer_size = 256,
+        .tx_buffer_size = 256,
     };
 
     esp_err_t ret = i2c_new_slave_device(&i2c_slv_config, &s_slave_ctx.dev_handle);
@@ -62,8 +62,8 @@ esp_err_t i2c_innstall_slave_driver_cnfig(void)
 
     // Register callbacks
     i2c_slave_event_callbacks_t cbs = {
-        .on_receive = i2c_slave_receive_cb,
-        .on_request = i2c_slave_request_cb,
+        .on_recv_done = i2c_slave_receive_cb,   // Changed
+        .on_req = i2c_slave_request_cb,         // Changed
     };
 
     ret = i2c_slave_register_event_callbacks(s_slave_ctx.dev_handle, &cbs, &s_slave_ctx);
