@@ -9,7 +9,7 @@ idf_component_register(
         i2c_motorcontroller_slave
         driver
         esp_timer
-        log
+        log_thread
         
     PRIV_REQUIRES 
 )

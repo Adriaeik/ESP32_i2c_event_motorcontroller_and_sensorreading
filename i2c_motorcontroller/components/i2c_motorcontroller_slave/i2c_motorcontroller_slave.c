@@ -1,485 +1,389 @@
-#include "i2c_master_manager.h"
-#include "esp_log.h"
+#include "i2c_motorcontroller_slave.h"
+#include "serde_helper.h"
+#include "log_thread.h"
 #include "driver/gpio.h"
 #include "sdkconfig.h"
 #include <string.h>
 
-static const char *TAG = "i2c_mgr";
+static const char *TAG = "i2c_motctrl_slave";
 
-static i2c_mgr_ctx_t s_master_ctx = {0};
+static i2c_motctrl_slave_ctx_t s_slave_ctx = {0};
 
-// Task for managing I2C operations
-static void i2c_master_manager_task(void *pvParameters);
+// Forward declarations
+static void i2c_slave_task(void *pvParameters);
+static bool i2c_slave_request_cb(i2c_slave_dev_handle_t i2c_slave, const i2c_slave_request_event_data_t *evt_data, void *arg);
+static bool i2c_slave_receive_cb(i2c_slave_dev_handle_t i2c_slave, const i2c_slave_rx_done_event_data_t *evt_data, void *arg);
 
-// Internal helper functions
-static esp_err_t i2c_master_execute_operation(i2c_operation_t *operation);
-static esp_err_t i2c_master_auto_configure_devices(void);
-static esp_err_t i2c_master_create_device_handle(const i2c_mgr_device_config_t *config);
-
-esp_err_t i2c_master_manager_init(i2c_mgr_callback_t callback, void *user_data)
+esp_err_t i2c_innstall_slave_driver_cnfig(void)
 {
-    if (s_master_ctx.bus_handle != NULL) {
-        ESP_LOGW(TAG, "Master manager already initialized");
+    if (s_slave_ctx.dev_handle != NULL) {
+        ESP_LOGW_THREAD(TAG, "Slave already initialized");
         return ESP_OK;
     }
 
-    // Initialize master context
-    memset(&s_master_ctx, 0, sizeof(s_master_ctx));
-    s_master_ctx.callback = callback;
-    s_master_ctx.callback_user_data = user_data;
-    s_master_ctx.max_devices = 8; // Maximum number of devices
+    // Initialize slave context
+    memset(&s_slave_ctx, 0, sizeof(s_slave_ctx));
+    s_slave_ctx.state = I2C_SLAVE_STATE_IDLE;
+    s_slave_ctx.status_byte = SLAVE_STATUS_IDLE;
 
-    // Allocate device arrays
-    s_master_ctx.device_handles = calloc(s_master_ctx.max_devices, sizeof(i2c_master_dev_handle_t));
-    s_master_ctx.device_configs = calloc(s_master_ctx.max_devices, sizeof(i2c_mgr_device_config_t));
-    
-    if (!s_master_ctx.device_handles || !s_master_ctx.device_configs) {
-        ESP_LOGE(TAG, "Failed to allocate device arrays");
+    // Create event queue
+    s_slave_ctx.event_queue = xQueueCreate(16, sizeof(i2c_slave_event_t));
+    if (s_slave_ctx.event_queue == NULL) {
+        ESP_LOGE_THREAD(TAG, "Failed to create event queue");
         return ESP_ERR_NO_MEM;
     }
 
-    // Initialize I2C master bus
-    i2c_master_bus_config_t i2c_mst_config = {
+    // Create operation event group
+    s_slave_ctx.operation_event_group = xEventGroupCreate();
+    if (s_slave_ctx.operation_event_group == NULL) {
+        ESP_LOGE_THREAD(TAG, "Failed to create operation event group");
+        vQueueDelete(s_slave_ctx.event_queue);
+        return ESP_ERR_NO_MEM;
+    }
+
+    // Configure I2C slave
+    i2c_slave_config_t i2c_slv_config = {
+        .i2c_port = CONFIG_MOTCTRL_SLAVE_I2C_NUM,
         .clk_source = I2C_CLK_SRC_DEFAULT,
-        .i2c_port = CONFIG_I2C_MASTER_I2C_NUM,
-        .scl_io_num = CONFIG_I2C_MASTER_SCL_GPIO,
-        .sda_io_num = CONFIG_I2C_MASTER_SDA_GPIO,
-        .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = true,
+        .scl_io_num = CONFIG_MOTCTRL_SLAVE_SCL_GPIO,
+        .sda_io_num = CONFIG_MOTCTRL_SLAVE_SDA_GPIO,
+        .slave_addr = CONFIG_MOTCTRL_SLAVE_ADDR,
+        .send_buf_depth = 256,
+        .receive_buf_depth = 256,
     };
 
-    esp_err_t ret = i2c_new_master_bus(&i2c_mst_config, &s_master_ctx.bus_handle);
+    esp_err_t ret = i2c_new_slave_device(&i2c_slv_config, &s_slave_ctx.dev_handle);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to create I2C master bus: %s", esp_err_to_name(ret));
-        goto cleanup;
+        ESP_LOGE_THREAD(TAG, "Failed to create I2C slave device: %s", esp_err_to_name(ret));
+        vEventGroupDelete(s_slave_ctx.operation_event_group);
+        vQueueDelete(s_slave_ctx.event_queue);
+        return ret;
     }
 
-    // Create operation queue
-    s_master_ctx.operation_queue = xQueueCreate(16, sizeof(i2c_operation_t));
-    if (s_master_ctx.operation_queue == NULL) {
-        ESP_LOGE(TAG, "Failed to create operation queue");
-        ret = ESP_ERR_NO_MEM;
-        goto cleanup;
-    }
+    // Register callbacks
+    i2c_slave_event_callbacks_t cbs = {
+        .on_receive = i2c_slave_receive_cb,
+        .on_request = i2c_slave_request_cb,
+    };
 
-    // Create event group
-    s_master_ctx.event_group = xEventGroupCreate();
-    if (s_master_ctx.event_group == NULL) {
-        ESP_LOGE(TAG, "Failed to create event group");
-        ret = ESP_ERR_NO_MEM;
-        goto cleanup;
-    }
-
-    // Auto-configure devices from Kconfig
-    ret = i2c_master_auto_configure_devices();
+    ret = i2c_slave_register_event_callbacks(s_slave_ctx.dev_handle, &cbs, &s_slave_ctx);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to auto-configure devices");
-        goto cleanup;
+        ESP_LOGE_THREAD(TAG, "Failed to register callbacks: %s", esp_err_to_name(ret));
+        i2c_del_slave_device(s_slave_ctx.dev_handle);
+        vEventGroupDelete(s_slave_ctx.operation_event_group);
+        vQueueDelete(s_slave_ctx.event_queue);
+        s_slave_ctx.dev_handle = NULL;
+        return ret;
     }
 
-    // Create manager task
+    // Create slave task
     BaseType_t task_ret = xTaskCreate(
-        i2c_master_manager_task,
-        "i2c_mgr",
+        i2c_slave_task,
+        "i2c_slave",
         4096,
         NULL,
-        6,
-        &s_master_ctx.manager_task_handle
+        5,
+        &s_slave_ctx.slave_task_handle
     );
 
     if (task_ret != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create manager task");
-        ret = ESP_ERR_NO_MEM;
-        goto cleanup;
-    }
-
-    xEventGroupSetBits(s_master_ctx.event_group, I2C_MASTER_INIT_DONE_BIT);
-    ESP_LOGI(TAG, "I2C master manager initialized with %d devices", s_master_ctx.num_devices);
-    return ESP_OK;
-
-cleanup:
-    i2c_master_manager_deinit();
-    return ret;
-}
-
-esp_err_t i2c_master_manager_deinit(void)
-{
-    // Stop manager task
-    if (s_master_ctx.manager_task_handle != NULL) {
-        vTaskDelete(s_master_ctx.manager_task_handle);
-        s_master_ctx.manager_task_handle = NULL;
-    }
-
-    // Remove all devices
-    for (int i = 0; i < s_master_ctx.num_devices; i++) {
-        if (s_master_ctx.device_handles[i] != NULL) {
-            i2c_master_bus_rm_device(s_master_ctx.device_handles[i]);
-        }
-    }
-
-    // Clean up resources
-    if (s_master_ctx.event_group != NULL) {
-        vEventGroupDelete(s_master_ctx.event_group);
-        s_master_ctx.event_group = NULL;
-    }
-
-    if (s_master_ctx.operation_queue != NULL) {
-        vQueueDelete(s_master_ctx.operation_queue);
-        s_master_ctx.operation_queue = NULL;
-    }
-
-    if (s_master_ctx.bus_handle != NULL) {
-        i2c_del_master_bus(s_master_ctx.bus_handle);
-        s_master_ctx.bus_handle = NULL;
-    }
-
-    if (s_master_ctx.device_handles) {
-        free(s_master_ctx.device_handles);
-        s_master_ctx.device_handles = NULL;
-    }
-
-    if (s_master_ctx.device_configs) {
-        free(s_master_ctx.device_configs);
-        s_master_ctx.device_configs = NULL;
-    }
-
-    ESP_LOGI(TAG, "I2C master manager deinitialized");
-    return ESP_OK;
-}
-
-esp_err_t i2c_master_add_device(const i2c_mgr_device_config_t *config)
-{
-    if (s_master_ctx.num_devices >= s_master_ctx.max_devices) {
-        ESP_LOGE(TAG, "Maximum number of devices reached");
+        ESP_LOGE_THREAD(TAG, "Failed to create slave task");
+        i2c_del_slave_device(s_slave_ctx.dev_handle);
+        vEventGroupDelete(s_slave_ctx.operation_event_group);
+        vQueueDelete(s_slave_ctx.event_queue);
+        s_slave_ctx.dev_handle = NULL;
         return ESP_ERR_NO_MEM;
     }
 
-    // Check if device already exists
-    for (int i = 0; i < s_master_ctx.num_devices; i++) {
-        if (s_master_ctx.device_configs[i].address == config->address) {
-            ESP_LOGW(TAG, "Device with address 0x%02X already exists", config->address);
-            return ESP_ERR_INVALID_ARG;
-        }
-    }
-
-    // Copy configuration
-    s_master_ctx.device_configs[s_master_ctx.num_devices] = *config;
-
-    // Create device handle
-    esp_err_t ret = i2c_master_create_device_handle(&s_master_ctx.device_configs[s_master_ctx.num_devices]);
-    if (ret != ESP_OK) {
-        return ret;
-    }
-
-    s_master_ctx.num_devices++;
-    ESP_LOGI(TAG, "Added device '%s' at address 0x%02X", config->name, config->address);
+    ESP_LOGI_THREAD(TAG, "I2C slave initialized successfully at address 0x%02X", CONFIG_MOTCTRL_SLAVE_ADDR);
     return ESP_OK;
 }
 
-esp_err_t i2c_master_queue_operation(const i2c_operation_t *operation)
+esp_err_t i2c_motctrl_slave_deinit(void)
 {
-    if (s_master_ctx.operation_queue == NULL) {
-        ESP_LOGE(TAG, "Manager not initialized");
+    if (s_slave_ctx.dev_handle == NULL) {
+        return ESP_OK;
+    }
+
+    // Stop slave task
+    if (s_slave_ctx.slave_task_handle != NULL) {
+        vTaskDelete(s_slave_ctx.slave_task_handle);
+        s_slave_ctx.slave_task_handle = NULL;
+    }
+
+    // Clean up resources
+    if (s_slave_ctx.operation_event_group != NULL) {
+        vEventGroupDelete(s_slave_ctx.operation_event_group);
+        s_slave_ctx.operation_event_group = NULL;
+    }
+
+    if (s_slave_ctx.event_queue != NULL) {
+        vQueueDelete(s_slave_ctx.event_queue);
+        s_slave_ctx.event_queue = NULL;
+    }
+
+    i2c_del_slave_device(s_slave_ctx.dev_handle);
+    s_slave_ctx.dev_handle = NULL;
+
+    ESP_LOGI_THREAD(TAG, "I2C slave deinitialized");
+    return ESP_OK;
+}
+
+esp_err_t i2c_motctrl_slave_wait_pkg(motorcontroller_pkg_t *pkg, int timeout_sec)
+{
+    if (s_slave_ctx.dev_handle == NULL) {
+        ESP_LOGE_THREAD(TAG, "Slave not initialized");
         return ESP_ERR_INVALID_STATE;
     }
 
-    if (xQueueSend(s_master_ctx.operation_queue, operation, pdMS_TO_TICKS(1000)) != pdTRUE) {
-        ESP_LOGE(TAG, "Failed to queue operation");
+    // Clear previous package flag and event bits
+    s_slave_ctx.pkg_ready = false;
+    xEventGroupClearBits(s_slave_ctx.operation_event_group, MOTCTRL_SLAVE_PKG_RECEIVED_BIT | MOTCTRL_SLAVE_ERROR_BIT);
+
+    // Set state to ready
+    s_slave_ctx.state = I2C_SLAVE_STATE_IDLE;
+    s_slave_ctx.status_byte = SLAVE_STATUS_READY;
+
+    ESP_LOGI_THREAD(TAG, "Waiting for package from master (timeout: %d seconds)...", timeout_sec);
+
+    // Wait for package
+    EventBits_t bits = xEventGroupWaitBits(
+        s_slave_ctx.operation_event_group,
+        MOTCTRL_SLAVE_PKG_RECEIVED_BIT | MOTCTRL_SLAVE_ERROR_BIT,
+        pdTRUE,
+        pdFALSE,
+        pdMS_TO_TICKS(timeout_sec * 1000)
+    );
+
+    if (bits & MOTCTRL_SLAVE_ERROR_BIT) {
+        ESP_LOGE_THREAD(TAG, "Error while waiting for package");
+        return ESP_FAIL;
+    }
+
+    if (!(bits & MOTCTRL_SLAVE_PKG_RECEIVED_BIT)) {
+        ESP_LOGW_THREAD(TAG, "Package wait timeout");
+        s_slave_ctx.state = I2C_SLAVE_STATE_IDLE;
+        s_slave_ctx.status_byte = SLAVE_STATUS_IDLE;
         return ESP_ERR_TIMEOUT;
     }
 
+    // Copy received package
+    *pkg = s_slave_ctx.received_pkg;
+    s_slave_ctx.state = I2C_SLAVE_STATE_PKG_RECEIVED;
+    
+    ESP_LOGI_THREAD(TAG, "Package received successfully");
     return ESP_OK;
 }
 
-esp_err_t i2c_master_sensor_read_reg(uint8_t device_addr, uint8_t reg_addr, uint8_t *data, size_t len, uint32_t timeout_ms)
+esp_err_t i2c_motctrl_slave_send_response(const motorcontroller_response_t *resp, int timeout_sec)
 {
-    i2c_operation_t operation = {
-        .op_type = I2C_OP_TYPE_SENSOR_READ,
-        .device_addr = device_addr,
-        .timeout_ms = timeout_ms,
-        .sensor.reg_addr = reg_addr,
-        .sensor.read_buffer = data,
-        .sensor.read_len = len
-    };
-
-    return i2c_master_queue_operation(&operation);
-}
-
-esp_err_t i2c_master_sensor_write_reg(uint8_t device_addr, uint8_t reg_addr, const uint8_t *data, size_t len, uint32_t timeout_ms)
-{
-    i2c_operation_t operation = {
-        .op_type = I2C_OP_TYPE_SENSOR_WRITE,
-        .device_addr = device_addr,
-        .data = (uint8_t*)data,
-        .data_len = len,
-        .timeout_ms = timeout_ms,
-        .sensor.reg_addr = reg_addr
-    };
-
-    return i2c_master_queue_operation(&operation);
-}
-
-bool i2c_master_device_is_available(uint8_t device_addr)
-{
-    // Find device handle
-    i2c_master_dev_handle_t device_handle = NULL;
-    for (int i = 0; i < s_master_ctx.num_devices; i++) {
-        if (s_master_ctx.device_configs[i].address == device_addr) {
-            device_handle = s_master_ctx.device_handles[i];
-            break;
-        }
+    if (s_slave_ctx.dev_handle == NULL) {
+        ESP_LOGE_THREAD(TAG, "Slave not initialized");
+        return ESP_ERR_INVALID_STATE;
     }
-    
-    if (device_handle == NULL) {
-        return false;
-    }
-    
-    // Try to probe the device
-    uint8_t dummy = 0;
-    esp_err_t ret = i2c_master_transmit(device_handle, &dummy, 0, pdMS_TO_TICKS(100));
-    return (ret == ESP_OK);
-}
 
-const i2c_mgr_device_config_t* i2c_master_get_device_config(uint8_t device_addr)
-{
-    for (int i = 0; i < s_master_ctx.num_devices; i++) {
-        if (s_master_ctx.device_configs[i].address == device_addr) {
-            return &s_master_ctx.device_configs[i];
-        }
-    }
-    return NULL;
-}
+    // Prepare response
+    s_slave_ctx.response_to_send = *resp;
+    s_slave_ctx.resp_ready = true;
+    s_slave_ctx.state = I2C_SLAVE_STATE_RESP_READY;
+    s_slave_ctx.status_byte = SLAVE_STATUS_RESP_READY;
 
-esp_err_t i2c_master_remove_device(uint8_t device_addr)
-{
-    for (int i = 0; i < s_master_ctx.num_devices; i++) {
-        if (s_master_ctx.device_configs[i].address == device_addr) {
-            // Remove device handle
-            if (s_master_ctx.device_handles[i] != NULL) {
-                i2c_master_bus_rm_device(s_master_ctx.device_handles[i]);
-            }
-            
-            // Shift remaining devices
-            for (int j = i; j < s_master_ctx.num_devices - 1; j++) {
-                s_master_ctx.device_configs[j] = s_master_ctx.device_configs[j + 1];
-                s_master_ctx.device_handles[j] = s_master_ctx.device_handles[j + 1];
-            }
-            
-            s_master_ctx.num_devices--;
-            ESP_LOGI(TAG, "Removed device at address 0x%02X", device_addr);
-            return ESP_OK;
-        }
-    }
-    
-    ESP_LOGW(TAG, "Device at address 0x%02X not found", device_addr);
-    return ESP_ERR_NOT_FOUND;
-}
-
-// Internal helper functions
-static esp_err_t i2c_master_auto_configure_devices(void)
-{
-    esp_err_t ret = ESP_OK;
-
-#ifdef CONFIG_LSM6DS032TR_DEVICE_ENABLED
-    // Add LSM6DS032TR sensor
-    i2c_mgr_device_config_t imu_config = {
-        .name = "LSM6DS032TR",
-        .address = CONFIG_LSM6DS032TR_I2C_ADDR,
-        .type = I2C_DEVICE_TYPE_LSM6DS032TR,
-        .speed_hz = CONFIG_I2C_MASTER_CLK_SPEED,
-        .enabled = true,
-        .lsm6ds032tr.sample_rate = CONFIG_LSM6DS032TR_SAMPLE_RATE
-    };
-
-    ret = i2c_master_add_device(&imu_config);
+    // Serialize response
+    uint16_t crc = calculate_resp_crc(resp);
+    esp_err_t ret = serialize_resp(resp, s_slave_ctx.tx_buffer, &s_slave_ctx.tx_len, crc);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to add LSM6DS032TR device");
+        ESP_LOGE_THREAD(TAG, "Failed to serialize response");
         return ret;
     }
-#endif
 
-#ifdef CONFIG_CUSTOM_DEVICE_1_ENABLED
-    // Add custom device 1
-    i2c_mgr_device_config_t custom1_config = {
-        .name = CONFIG_CUSTOM_DEVICE_1_NAME,
-        .address = CONFIG_CUSTOM_DEVICE_1_ADDR,
-        .type = I2C_DEVICE_TYPE_CUSTOM,
-        .speed_hz = CONFIG_I2C_MASTER_CLK_SPEED,
-        .enabled = true
-    };
+    ESP_LOGI_THREAD(TAG, "Response ready, waiting for master to read...");
 
-    ret = i2c_master_add_device(&custom1_config);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to add custom device 1");
-        return ret;
-    }
-#endif
+    // Clear event bits
+    xEventGroupClearBits(s_slave_ctx.operation_event_group, MOTCTRL_SLAVE_RESP_SENT_BIT | MOTCTRL_SLAVE_ERROR_BIT);
 
-#ifdef CONFIG_CUSTOM_DEVICE_2_ENABLED
-    // Add custom device 2
-    i2c_mgr_device_config_t custom2_config = {
-        .name = CONFIG_CUSTOM_DEVICE_2_NAME,
-        .address = CONFIG_CUSTOM_DEVICE_2_ADDR,
-        .type = I2C_DEVICE_TYPE_CUSTOM,
-        .speed_hz = CONFIG_I2C_MASTER_CLK_SPEED,
-        .enabled = true
-    };
-
-    ret = i2c_master_add_device(&custom2_config);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to add custom device 2");
-        return ret;
-    }
-#endif
-
-    return ESP_OK;
-}
-
-static esp_err_t i2c_master_create_device_handle(const i2c_mgr_device_config_t *config)
-{
-    i2c_device_config_t dev_cfg = {  // Use ESP-IDF's type here
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address = config->address,
-        .scl_speed_hz = config->speed_hz,
-    };
-
-    esp_err_t ret = i2c_master_bus_add_device(
-        s_master_ctx.bus_handle, 
-        &dev_cfg, 
-        &s_master_ctx.device_handles[s_master_ctx.num_devices]
+    // Wait for response to be sent
+    EventBits_t bits = xEventGroupWaitBits(
+        s_slave_ctx.operation_event_group,
+        MOTCTRL_SLAVE_RESP_SENT_BIT | MOTCTRL_SLAVE_ERROR_BIT,
+        pdTRUE,
+        pdFALSE,
+        pdMS_TO_TICKS(timeout_sec * 1000)
     );
 
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to add device handle for %s: %s", config->name, esp_err_to_name(ret));
+    if (bits & MOTCTRL_SLAVE_ERROR_BIT) {
+        ESP_LOGE_THREAD(TAG, "Error while sending response");
+        return ESP_FAIL;
     }
 
-    return ret;
+    if (!(bits & MOTCTRL_SLAVE_RESP_SENT_BIT)) {
+        ESP_LOGW_THREAD(TAG, "Response send timeout");
+        return ESP_ERR_TIMEOUT;
+    }
+
+    // Reset state
+    s_slave_ctx.state = I2C_SLAVE_STATE_IDLE;
+    s_slave_ctx.status_byte = SLAVE_STATUS_IDLE;
+    s_slave_ctx.resp_ready = false;
+
+    ESP_LOGI_THREAD(TAG, "Response sent successfully");
+    return ESP_OK;
 }
 
-static void i2c_master_manager_task(void *pvParameters)
+esp_err_t i2c_motctrl_slave_set_working(void)
 {
-    i2c_operation_t operation;
-    ESP_LOGI(TAG, "I2C master manager task started");
+    s_slave_ctx.state = I2C_SLAVE_STATE_WORKING;
+    s_slave_ctx.status_byte = SLAVE_STATUS_WORKING;
+    ESP_LOGI_THREAD(TAG, "Slave state set to WORKING");
+    return ESP_OK;
+}
 
+esp_err_t i2c_motctrl_slave_set_response_ready(const motorcontroller_response_t *resp)
+{
+    s_slave_ctx.response_to_send = *resp;
+    s_slave_ctx.resp_ready = true;
+    s_slave_ctx.state = I2C_SLAVE_STATE_RESP_READY;
+    s_slave_ctx.status_byte = SLAVE_STATUS_RESP_READY;
+    
+    // Prepare serialized response
+    uint16_t crc = calculate_resp_crc(resp);
+    serialize_resp(resp, s_slave_ctx.tx_buffer, &s_slave_ctx.tx_len, crc);
+    
+    ESP_LOGI_THREAD(TAG, "Response set and ready for master");
+    return ESP_OK;
+}
+
+i2c_slave_state_t i2c_motctrl_slave_get_state(void)
+{
+    return s_slave_ctx.state;
+}
+
+bool i2c_motctrl_slave_is_ready(void)
+{
+    return (s_slave_ctx.dev_handle != NULL && s_slave_ctx.state == I2C_SLAVE_STATE_IDLE);
+}
+
+// Callback functions
+static bool i2c_slave_request_cb(i2c_slave_dev_handle_t i2c_slave, const i2c_slave_request_event_data_t *evt_data, void *arg)
+{
+    i2c_motctrl_slave_ctx_t *ctx = (i2c_motctrl_slave_ctx_t *)arg;
+    i2c_slave_event_t evt = I2C_SLAVE_EVT_RESP_REQUESTED;
+    BaseType_t xTaskWoken = pdFALSE;
+    
+    xQueueSendFromISR(ctx->event_queue, &evt, &xTaskWoken);
+    return xTaskWoken == pdTRUE;
+}
+
+static bool i2c_slave_receive_cb(i2c_slave_dev_handle_t i2c_slave, const i2c_slave_rx_done_event_data_t *evt_data, void *arg)
+{
+    i2c_motctrl_slave_ctx_t *ctx = (i2c_motctrl_slave_ctx_t *)arg;
+    
+    // Copy received data to buffer
+    if (evt_data->buffer && evt_data->length > 0) {
+        size_t copy_len = (evt_data->length > sizeof(ctx->rx_buffer)) ? sizeof(ctx->rx_buffer) : evt_data->length;
+        memcpy(ctx->rx_buffer, evt_data->buffer, copy_len);
+        ctx->rx_len = copy_len;
+        
+        i2c_slave_event_t evt = I2C_SLAVE_EVT_PKG_RECEIVED;
+        BaseType_t xTaskWoken = pdFALSE;
+        xQueueSendFromISR(ctx->event_queue, &evt, &xTaskWoken);
+        return xTaskWoken == pdTRUE;
+    }
+    
+    return false;
+}
+
+static void i2c_slave_task(void *pvParameters)
+{
+    i2c_slave_event_t evt;
+    uint32_t write_len;
+    
+    ESP_LOGI_THREAD(TAG, "I2C slave task started");
+    
     while (true) {
-        if (xQueueReceive(s_master_ctx.operation_queue, &operation, portMAX_DELAY) == pdTRUE) {
-            ESP_LOGD(TAG, "Executing operation type %d for device 0x%02X", operation.op_type, operation.device_addr);
-            
-            s_master_ctx.current_operation = &operation;
-            s_master_ctx.operation_start_time = xTaskGetTickCount();
-            
-            esp_err_t result = i2c_master_execute_operation(&operation);
-            
-            // Notify callback if present
-            if (s_master_ctx.callback) {
-                i2c_mgr_event_data_t event_data = {
-                    .event_type = (result == ESP_OK) ? I2C_MGR_EVT_OPERATION_COMPLETE : I2C_MGR_EVT_OPERATION_ERROR,
-                    .device_addr = operation.device_addr,
-                    .error_code = result,
-                    .operation = &operation,
-                    .result_data = operation.data,
-                    .result_len = operation.data_len
-                };
+        if (xQueueReceive(s_slave_ctx.event_queue, &evt, portMAX_DELAY) == pdTRUE) {
+            switch (evt) {
+                case I2C_SLAVE_EVT_PKG_RECEIVED:
+                {
+                    ESP_LOGI_THREAD(TAG, "Package data received, length: %d", s_slave_ctx.rx_len);
+                    
+                    // Check if this is a status query (single byte)
+                    if (s_slave_ctx.rx_len == 1) {
+                        ESP_LOGD_THREAD(TAG, "Status query received");
+                        continue;
+                    }
+                    
+                    // Try to deserialize package
+                    uint16_t received_crc;
+                    esp_err_t ret = deserialize_pkg(s_slave_ctx.rx_buffer, s_slave_ctx.rx_len, 
+                                                   &s_slave_ctx.received_pkg, &received_crc);
+                    
+                    if (ret != ESP_OK) {
+                        ESP_LOGE_THREAD(TAG, "Failed to deserialize package: %s", esp_err_to_name(ret));
+                        xEventGroupSetBits(s_slave_ctx.operation_event_group, MOTCTRL_SLAVE_ERROR_BIT);
+                        continue;
+                    }
+                    
+                    // Verify CRC
+                    uint16_t calculated_crc = calculate_pkg_crc(&s_slave_ctx.received_pkg);
+                    if (received_crc != calculated_crc) {
+                        ESP_LOGE_THREAD(TAG, "Package CRC mismatch: received 0x%04X, calculated 0x%04X", 
+                                  received_crc, calculated_crc);
+                        xEventGroupSetBits(s_slave_ctx.operation_event_group, MOTCTRL_SLAVE_ERROR_BIT);
+                        continue;
+                    }
+                    
+                    ESP_LOGI_THREAD(TAG, "Package received and validated successfully");
+                    s_slave_ctx.pkg_ready = true;
+                    s_slave_ctx.state = I2C_SLAVE_STATE_PKG_RECEIVED;
+                    xEventGroupSetBits(s_slave_ctx.operation_event_group, MOTCTRL_SLAVE_PKG_RECEIVED_BIT);
+                    break;
+                }
                 
-                s_master_ctx.callback(&event_data, s_master_ctx.callback_user_data);
-            }
-            
-            s_master_ctx.current_operation = NULL;
-            
-            if (result == ESP_OK) {
-                xEventGroupSetBits(s_master_ctx.event_group, I2C_MASTER_OPERATION_DONE_BIT);
-            } else {
-                xEventGroupSetBits(s_master_ctx.event_group, I2C_MASTER_ERROR_BIT);
+                case I2C_SLAVE_EVT_RESP_REQUESTED:
+                {
+                    ESP_LOGD_THREAD(TAG, "Master requesting data");
+                    
+                    // Determine what to send based on current state
+                    uint8_t *data_to_send = &s_slave_ctx.status_byte;
+                    size_t data_len = 1;
+                    
+                    if (s_slave_ctx.resp_ready && s_slave_ctx.state == I2C_SLAVE_STATE_RESP_READY) {
+                        // Send the prepared response
+                        data_to_send = s_slave_ctx.tx_buffer;
+                        data_len = s_slave_ctx.tx_len;
+                        ESP_LOGI_THREAD(TAG, "Sending response data (%d bytes)", data_len);
+                    } else {
+                        // Send status byte only
+                        ESP_LOGD_THREAD(TAG, "Sending status byte: 0x%02X", s_slave_ctx.status_byte);
+                    }
+                    
+                    // Write data to slave transmit buffer
+                    esp_err_t ret = i2c_slave_write(s_slave_ctx.dev_handle, data_to_send, data_len, 
+                                                   &write_len, pdMS_TO_TICKS(1000));
+                    
+                    if (ret != ESP_OK) {
+                        ESP_LOGE_THREAD(TAG, "Failed to write data: %s", esp_err_to_name(ret));
+                        xEventGroupSetBits(s_slave_ctx.operation_event_group, MOTCTRL_SLAVE_ERROR_BIT);
+                    } else if (s_slave_ctx.resp_ready && write_len == s_slave_ctx.tx_len) {
+                        // Response sent successfully
+                        ESP_LOGI_THREAD(TAG, "Response sent successfully");
+                        s_slave_ctx.state = I2C_SLAVE_STATE_RESP_SENT;
+                        xEventGroupSetBits(s_slave_ctx.operation_event_group, MOTCTRL_SLAVE_RESP_SENT_BIT);
+                    }
+                    break;
+                }
+                
+                case I2C_SLAVE_EVT_ERROR:
+                    ESP_LOGE_THREAD(TAG, "Slave error event");
+                    xEventGroupSetBits(s_slave_ctx.operation_event_group, MOTCTRL_SLAVE_ERROR_BIT);
+                    break;
+                    
+                default:
+                    ESP_LOGW_THREAD(TAG, "Unknown event: %d", evt);
+                    break;
             }
         }
     }
-}
-
-static esp_err_t i2c_master_execute_operation(i2c_operation_t *operation)
-{
-    // Find device handle
-    i2c_master_dev_handle_t device_handle = NULL;
-    for (int i = 0; i < s_master_ctx.num_devices; i++) {
-        if (s_master_ctx.device_configs[i].address == operation->device_addr) {
-            device_handle = s_master_ctx.device_handles[i];
-            break;
-        }
-    }
     
-    if (device_handle == NULL) {
-        ESP_LOGE(TAG, "Device handle not found for address 0x%02X", operation->device_addr);
-        return ESP_ERR_NOT_FOUND;
-    }
-    
-    esp_err_t ret = ESP_OK;
-    
-    switch (operation->op_type) {
-        case I2C_OP_TYPE_SENSOR_READ:
-        {
-            // Read from sensor register
-            ret = i2c_master_transmit_receive(
-                device_handle,
-                &operation->sensor.reg_addr, 1,
-                operation->sensor.read_buffer, operation->sensor.read_len,
-                pdMS_TO_TICKS(operation->timeout_ms)
-            );
-            
-            if (ret != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to read from sensor register 0x%02X: %s", 
-                        operation->sensor.reg_addr, esp_err_to_name(ret));
-            } else {
-                ESP_LOGD(TAG, "Read %d bytes from sensor register 0x%02X", 
-                        operation->sensor.read_len, operation->sensor.reg_addr);
-            }
-            break;
-        }
-        
-        case I2C_OP_TYPE_SENSOR_WRITE:
-        {
-            // Write to sensor register
-            uint8_t write_buffer[operation->data_len + 1];
-            write_buffer[0] = operation->sensor.reg_addr;
-            memcpy(&write_buffer[1], operation->data, operation->data_len);
-            
-            ret = i2c_master_transmit(device_handle, write_buffer, operation->data_len + 1, 
-                                     pdMS_TO_TICKS(operation->timeout_ms));
-            
-            if (ret != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to write to sensor register 0x%02X: %s", 
-                        operation->sensor.reg_addr, esp_err_to_name(ret));
-            } else {
-                ESP_LOGD(TAG, "Wrote %d bytes to sensor register 0x%02X", 
-                        operation->data_len, operation->sensor.reg_addr);
-            }
-            break;
-        }
-        
-        case I2C_OP_TYPE_CUSTOM:
-        {
-            // Custom operation - just transmit raw data
-            if (operation->data && operation->data_len > 0) {
-                ret = i2c_master_transmit(device_handle, operation->data, operation->data_len, 
-                                         pdMS_TO_TICKS(operation->timeout_ms));
-            } else {
-                ESP_LOGW(TAG, "Custom operation with no data");
-                ret = ESP_ERR_INVALID_ARG;
-            }
-            break;
-        }
-        
-        case I2C_OP_TYPE_MOTOR_CTRL_SEND_PKG:
-        case I2C_OP_TYPE_MOTOR_CTRL_GET_RESP:
-        {
-            ESP_LOGE(TAG, "Motor controller operations not supported in manager - use wrapper");
-            ret = ESP_ERR_NOT_SUPPORTED;
-            break;
-        }
-        
-        default:
-            ESP_LOGE(TAG, "Unknown operation type: %d", operation->op_type);
-            ret = ESP_ERR_INVALID_ARG;
-            break;
-    }
-    
-    return ret;
+    vTaskDelete(NULL);
 }
