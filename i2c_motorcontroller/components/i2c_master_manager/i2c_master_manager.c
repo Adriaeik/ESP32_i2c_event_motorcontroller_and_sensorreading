@@ -516,8 +516,12 @@ bool i2c_master_device_is_available(uint8_t device_addr)
     
     // FIXED: Try to probe the device with proper buffer
     uint8_t dummy = 0;
-    esp_err_t ret = i2c_master_transmit(device_handle, &dummy, 0, pdMS_TO_TICKS(100));
-    return (ret == ESP_OK);
+    for (int i = 0; i < 3; i++) {
+        if (i2c_master_transmit(device_handle, &dummy, 1,  pdMS_TO_TICKS(100)) == ESP_OK) 
+            return true;
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    return false;
 }
 
 const i2c_mgr_device_config_t* i2c_master_get_device_config(uint8_t device_addr)
