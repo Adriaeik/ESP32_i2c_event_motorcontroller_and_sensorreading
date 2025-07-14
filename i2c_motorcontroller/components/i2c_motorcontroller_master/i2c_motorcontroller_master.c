@@ -293,61 +293,90 @@ static esp_err_t execute_motor_ctrl_get_resp(motorcontroller_response_t *resp, u
         ESP_LOGE(TAG, "Motor controller device not found");
         return ESP_ERR_NOT_FOUND;
     }
-    
-    // FIXED: We need to implement a polling strategy to get response from slave
-    // The slave will provide status bytes until it has a full response ready
-    
-    uint8_t status_buffer[256];
+
+    const int poll_interval_ms = 100;
+    const int max_retries = (timeout_ms + poll_interval_ms - 1) / poll_interval_ms;
     int retry_count = 0;
-    const int MAX_RETRIES = timeout_ms / 1000; // Check every second
-    
+    uint8_t status_byte = 0;
+
     ESP_LOGI(TAG, "Polling for motor controller response...");
-    
-    while (retry_count < MAX_RETRIES) {
-        // Find device handle for direct communication
-        i2c_master_dev_handle_t device_handle = NULL;
-        for (int i = 0; i < 8; i++) {  // Assuming max 8 devices
-            const i2c_mgr_device_config_t *cfg = i2c_master_get_device_config(CONFIG_MOTCTRL_I2C_ADDR);
-            if (cfg != NULL) {
-                // We need access to the actual device handle - this is a limitation of the current design
-                // For now, we'll use a simple approach
-                break;
+
+    while (retry_count < max_retries) {
+        // Read status byte from slave
+        esp_err_t err = ESP_OK;
+        // err = i2c_master_read_device(
+        //     CONFIG_MOTCTRL_I2C_ADDR,
+        //     &status_byte,
+        //     sizeof(status_byte),
+        //     poll_interval_ms
+        // );
+
+        if (err != ESP_OK) {
+            ESP_LOGD(TAG, "Status read failed: %s (retry %d/%d)", 
+                    esp_err_to_name(err), retry_count+1, max_retries);
+        } else {
+            ESP_LOGD(TAG, "Status byte: 0x%02x", status_byte);
+
+            // Handle response states
+            if (status_byte == SLAVE_STATUS_RESP_READY) {
+                uint8_t response_buffer[WIRE_RESP_SIZE];
+                
+                // Read full response
+                err = i2c_master_read_device(
+                    CONFIG_MOTCTRL_I2C_ADDR,
+                    response_buffer,
+                    sizeof(response_buffer),
+                    1000
+                );
+                
+                if (err != ESP_OK) {
+                    ESP_LOGE(TAG, "Response read failed: %s", esp_err_to_name(err));
+                    return err;
+                }
+
+                // Deserialize and validate response
+                uint16_t received_crc;
+                err = deserialize_resp(response_buffer, sizeof(response_buffer), resp, &received_crc);
+                if (err != ESP_OK) {
+                    ESP_LOGE(TAG, "Deserialization failed: %s", esp_err_to_name(err));
+                    return err;
+                }
+
+                // Calculate CRC for received response
+                uint16_t calculated_crc = calculate_resp_crc(resp);
+                if (received_crc != calculated_crc) {
+                    ESP_LOGE(TAG, "CRC mismatch: received 0x%04X vs calculated 0x%04X", 
+                            received_crc, calculated_crc);
+                    return ESP_ERR_INVALID_CRC;
+                }
+
+                ESP_LOGI(TAG, "Response received successfully");
+                return ESP_OK;
+            }
+            else if (status_byte == SLAVE_STATUS_BUSY) {
+                ESP_LOGD(TAG, "Slave busy, waiting...");
+            }
+            else if (status_byte == SLAVE_STATUS_IDLE) {
+                ESP_LOGD(TAG, "Slave idle, waiting for response...");
+            }
+            else {
+                ESP_LOGW(TAG, "Unexpected status: 0x%02x", status_byte);
             }
         }
-        
-        // Try to read response directly using a custom operation
-        memset(status_buffer, 0, sizeof(status_buffer));
-        
-        i2c_operation_t read_operation = {
-            .op_type = I2C_OP_TYPE_CUSTOM,
-            .device_addr = CONFIG_MOTCTRL_I2C_ADDR,
-            .data = status_buffer,
-            .data_len = WIRE_RESP_SIZE,
-            .timeout_ms = 1000
-        };
-        
-        // ISSUE: The current manager doesn't support read operations properly
-        // We need to modify this approach
-        
-        ESP_LOGW(TAG, "Response polling not fully implemented yet - this needs device handle access");
-        
-        // For now, simulate a successful response after some time
-        if (retry_count > 5) {  // Wait at least 5 seconds
-            // Create a dummy response
-            motorcontroller_response_init_default(resp);
-            resp->result = ESP_OK;
-            resp->STATE = LOWERING;
-            resp->working_time = 5;
-            resp->estimated_cm_per_s = 5000;
-            
-            ESP_LOGW(TAG, "Using simulated response - full implementation needed");
-            return ESP_OK;
+
+        // Handle early completion cases
+        if (err == ESP_OK && status_byte == SLAVE_STATUS_RESP_READY) {
+            break;
         }
-        
-        vTaskDelay(pdMS_TO_TICKS(1000)); // Wait 1 second
+
+        vTaskDelay(pdMS_TO_TICKS(poll_interval_ms));
         retry_count++;
     }
-    
-    ESP_LOGE(TAG, "Response polling timeout after %d retries", retry_count);
-    return ESP_ERR_TIMEOUT;
+
+    if (retry_count >= max_retries) {
+        ESP_LOGE(TAG, "Response polling timeout after %dms", timeout_ms);
+        return ESP_ERR_TIMEOUT;
+    }
+
+    return ESP_OK;
 }

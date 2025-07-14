@@ -219,6 +219,8 @@ const i2c_mgr_device_config_t* i2c_master_get_device_config(uint8_t device_addr)
 
 void i2c_scan_physical_bus();
 
+esp_err_t i2c_master_read_device(uint8_t device_addr, uint8_t *data, size_t len, uint32_t timeout_ms);
+
 #ifdef __cplusplus
 }
 #endif

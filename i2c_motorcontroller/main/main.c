@@ -134,6 +134,7 @@ static void test_motor_controller(void)
     ESP_LOGI_THREAD(TAG, "Waiting for response (estimated: %d seconds)...", wait_time);
     
     motorcontroller_response_t resp;
+    vTaskDelay(pdMS_TO_TICKS(6000));
     err = i2c_motctrl_master_wait_response(&resp, wait_time);
     if (err != ESP_OK) {
         ESP_LOGE_THREAD(TAG, "Motor controller response failed: %s", esp_err_to_name(err));

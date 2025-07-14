@@ -579,3 +579,24 @@ void i2c_scan_physical_bus() {
         ESP_LOGW(TAG, "No devices responded during scan - check wiring and pull-ups");
     }
 }
+
+// Helper function for direct device handle access
+static i2c_master_dev_handle_t get_device_handle(uint8_t device_addr)
+{
+    for (int i = 0; i < s_master_ctx.num_devices; i++) {
+        if (s_master_ctx.device_configs[i].address == device_addr) {
+            return s_master_ctx.device_handles[i];
+        }
+    }
+    return NULL;
+}
+
+// Custom read function using your I2C manager's device handles
+esp_err_t i2c_master_read_device(uint8_t device_addr, uint8_t *data, size_t len, uint32_t timeout_ms)
+{
+    i2c_master_dev_handle_t device_handle = get_device_handle(device_addr);
+    if (device_handle == NULL) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    return i2c_master_receive(device_handle, data, len, timeout_ms);
+}
