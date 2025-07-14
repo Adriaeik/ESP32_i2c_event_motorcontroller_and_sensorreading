@@ -23,8 +23,8 @@ menu "I2C Master Manager Configuration"
 
     config I2C_MASTER_CLK_SPEED
         int "I2C clock speed (Hz)"
-        range 1000 400000
-        default 1000
+        range 200000 1000000
+        default 400000
         help
             I2C clock speed in Hz.
 

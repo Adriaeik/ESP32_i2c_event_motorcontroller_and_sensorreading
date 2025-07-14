@@ -1,6 +1,6 @@
 {
   "C_Cpp.intelliSenseEngine": "default",
-  "idf.espIdfPathWin": "C:\\Users\\eikel\\esp\\v5.4.1\\esp-idf",
+  "idf.espIdfPathWin": "C:\\Users\\eikel\\esp\\v5.5\\esp-idf",
   "idf.pythonInstallPath": "C:\\Users\\eikel\\.espressif\\tools\\idf-python\\3.11.2\\python.exe",
   "idf.openOcdConfigs": [
     "board/esp32-wrover-kit-3.3v.cfg"
@@ -22,8 +22,13 @@
     "soc_caps.h": "c",
     "task.h": "c",
     "serde_helper.h": "c",
-    "functional": "c"
+    "functional": "c",
+    "i2c_motorcontroller_master.h": "c",
+    "i2c_master_manager.h": "c",
+    "queue.h": "c",
+    "i2c_slave.h": "c",
+    "freertos.h": "c"
   },
   "idf.flashType": "UART",
-  "idf.portWin": "COM4"
+  "idf.portWin": "COM15"
 }

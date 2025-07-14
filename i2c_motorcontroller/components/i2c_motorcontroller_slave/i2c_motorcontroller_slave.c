@@ -11,8 +11,8 @@ static i2c_motctrl_slave_ctx_t s_slave_ctx = {0};
 
 // Forward declarations
 static void i2c_slave_task(void *pvParameters);
-static bool i2c_slave_request_cb(i2c_slave_dev_handle_t i2c_slave, const i2c_slave_request_event_data_t *evt_data, void *arg);
-static bool i2c_slave_receive_cb(i2c_slave_dev_handle_t i2c_slave, const i2c_slave_rx_done_event_data_t *evt_data, void *arg);
+static bool IRAM_ATTR i2c_slave_receive_cb(i2c_slave_dev_handle_t i2c_slave, const i2c_slave_rx_done_event_data_t *evt_data, void *arg);
+static bool IRAM_ATTR i2c_slave_request_cb(i2c_slave_dev_handle_t i2c_slave, const i2c_slave_request_event_data_t *evt_data, void *arg);
 
 esp_err_t i2c_install_slave_driver_config(void)
 {
@@ -41,19 +41,21 @@ esp_err_t i2c_install_slave_driver_config(void)
         return ESP_ERR_NO_MEM;
     }
 
-    // Configure I2C slave - FIXED for v5.4.1 API
+    // Configure I2C slave - FIXED for v2 API
     i2c_slave_config_t i2c_slv_config = {
         .i2c_port = CONFIG_MOTCTRL_SLAVE_I2C_NUM,
         .clk_source = I2C_CLK_SRC_DEFAULT,
         .scl_io_num = CONFIG_MOTCTRL_SLAVE_SCL_GPIO,
         .sda_io_num = CONFIG_MOTCTRL_SLAVE_SDA_GPIO,
-        .slave_addr = CONFIG_MOTCTRL_SLAVE_ADDR,
-        .send_buf_depth = 256,      // Correct parameter name
-        .receive_buf_depth = 256,   // Correct parameter name
+        .slave_addr = CONFIG_MOTCTRL_I2C_ADDR,  // FIXED: Use same address as master expects
+        .send_buf_depth = 256,
+        .receive_buf_depth = 256,
+        .addr_bit_len = I2C_ADDR_BIT_LEN_7,
         .flags = {
-            .enable_internal_pullup = true,  // Important for I2C
+            .enable_internal_pullup = true,
         }
     };
+    
     esp_err_t ret = i2c_new_slave_device(&i2c_slv_config, &s_slave_ctx.dev_handle);
     if (ret != ESP_OK) {
         ESP_LOGE_THREAD(TAG, "Failed to create I2C slave device: %s", esp_err_to_name(ret));
@@ -62,10 +64,10 @@ esp_err_t i2c_install_slave_driver_config(void)
         return ret;
     }
 
-    // Register callbacks - FIXED for v5.4.1 API
+    // Register callbacks - FIXED for v2 API (correct callback names)
     i2c_slave_event_callbacks_t cbs = {
-        .on_request = i2c_slave_request_cb,   // Receive callback
-        .on_receive = i2c_slave_receive_cb,   // Request callback
+        .on_request = i2c_slave_request_cb,    // FIXED: When master wants to read from slave
+        .on_receive = i2c_slave_receive_cb,    // FIXED: When master writes to slave
     };
 
     ret = i2c_slave_register_event_callbacks(s_slave_ctx.dev_handle, &cbs, &s_slave_ctx);
@@ -97,7 +99,10 @@ esp_err_t i2c_install_slave_driver_config(void)
         return ESP_ERR_NO_MEM;
     }
 
-    ESP_LOGI_THREAD(TAG, "I2C slave initialized successfully at address 0x%02X", CONFIG_MOTCTRL_SLAVE_ADDR);
+    // Note: In v2 driver, receiving is handled automatically by the driver
+    // No need to manually call i2c_slave_receive - callbacks will be triggered automatically
+
+    ESP_LOGI_THREAD(TAG, "I2C slave initialized successfully at address 0x%02X", CONFIG_MOTCTRL_I2C_ADDR);
     return ESP_OK;
 }
 
@@ -264,38 +269,40 @@ bool i2c_motctrl_slave_is_ready(void)
     return (s_slave_ctx.dev_handle != NULL && s_slave_ctx.state == I2C_SLAVE_STATE_IDLE);
 }
 
-// Callback functions
-static bool i2c_slave_request_cb(i2c_slave_dev_handle_t i2c_slave, const i2c_slave_request_event_data_t *evt_data, void *arg)
-{
-    i2c_motctrl_slave_ctx_t *ctx = (i2c_motctrl_slave_ctx_t *)arg;
-    i2c_slave_event_t evt = I2C_SLAVE_EVT_RESP_REQUESTED;
-    BaseType_t xTaskWoken = pdFALSE;
-    
-    xQueueSendFromISR(ctx->event_queue, &evt, &xTaskWoken);
-    return xTaskWoken == pdTRUE;
-}
-
-// FIXED receive callback for v5.4.1 API
-static bool i2c_slave_receive_cb(i2c_slave_dev_handle_t i2c_slave, const i2c_slave_rx_done_event_data_t *evt_data, void *arg)
+// FIXED Callback functions for v2 API
+static bool IRAM_ATTR i2c_slave_receive_cb(i2c_slave_dev_handle_t i2c_slave, const i2c_slave_rx_done_event_data_t *evt_data, void *arg)
 {
     i2c_motctrl_slave_ctx_t *ctx = (i2c_motctrl_slave_ctx_t *)arg;
     BaseType_t xTaskWoken = pdFALSE;
     
-    // FIXED: Use received_bytes instead of length
     if (evt_data->buffer && evt_data->length > 0) {
-        // Copy received data
-        size_t copy_len = (evt_data->length > sizeof(ctx->rx_buffer)) ? 
-                          sizeof(ctx->rx_buffer) : evt_data->length;
+        // Clear previous receive buffer first
+        memset(ctx->rx_buffer, 0, sizeof(ctx->rx_buffer));
+        
+        // Copy received data to our buffer - limit to expected size
+        size_t copy_len = evt_data->length;
+        if (copy_len > sizeof(ctx->rx_buffer)) {
+            copy_len = sizeof(ctx->rx_buffer);
+        }
+        
         memcpy(ctx->rx_buffer, evt_data->buffer, copy_len);
         ctx->rx_len = copy_len;
-        
-        ESP_EARLY_LOGD(TAG, "Received %d bytes", copy_len);
         
         // Send event to task
         i2c_slave_event_t evt = I2C_SLAVE_EVT_PKG_RECEIVED;
         xQueueSendFromISR(ctx->event_queue, &evt, &xTaskWoken);
     }
     
+    return xTaskWoken == pdTRUE;
+}
+
+static bool IRAM_ATTR i2c_slave_request_cb(i2c_slave_dev_handle_t i2c_slave, const i2c_slave_request_event_data_t *evt_data, void *arg)
+{
+    i2c_motctrl_slave_ctx_t *ctx = (i2c_motctrl_slave_ctx_t *)arg;
+    i2c_slave_event_t evt = I2C_SLAVE_EVT_RESP_REQUESTED;
+    BaseType_t xTaskWoken = pdFALSE;
+    
+    xQueueSendFromISR(ctx->event_queue, &evt, &xTaskWoken);
     return xTaskWoken == pdTRUE;
 }
 
@@ -306,23 +313,41 @@ static void i2c_slave_task(void *pvParameters)
     ESP_LOGI_THREAD(TAG, "I2C slave task started");
     
     while (true) {
-        if (xQueueReceive(s_slave_ctx.event_queue, &evt, pdMS_TO_TICKS(10)) == pdTRUE) {
+        if (xQueueReceive(s_slave_ctx.event_queue, &evt, pdMS_TO_TICKS(100)) == pdTRUE) {
             switch (evt) {
                 case I2C_SLAVE_EVT_PKG_RECEIVED:
                 {
                     ESP_LOGI_THREAD(TAG, "Package data received, length: %d", s_slave_ctx.rx_len);
+                    ESP_LOG_BUFFER_HEX_LEVEL(TAG, s_slave_ctx.rx_buffer, s_slave_ctx.rx_len, ESP_LOG_INFO);
                     
                     // Single byte probe - master checking status
                     if (s_slave_ctx.rx_len == 1) {
                         ESP_LOGD_THREAD(TAG, "Status probe received, command: 0x%02X", s_slave_ctx.rx_buffer[0]);
-                        // Store command for response
+                        // Update status based on current state
                         s_slave_ctx.status_byte = (s_slave_ctx.state == I2C_SLAVE_STATE_RESP_READY) ? 
                                                   SLAVE_STATUS_RESP_READY : SLAVE_STATUS_READY;
+                        // Note: v2 driver handles receive automatically
                         continue;
                     }
                     
-                    // Full package received
+                    // Full package received - check exact size match
+                    ESP_LOGI_THREAD(TAG, "Expected package size: %d, received: %d", WIRE_PKG_SIZE, s_slave_ctx.rx_len);
+                    if (s_slave_ctx.rx_len != WIRE_PKG_SIZE) {
+                        ESP_LOGE_THREAD(TAG, "Package size mismatch: expected %d, got %d", WIRE_PKG_SIZE, s_slave_ctx.rx_len);
+                        s_slave_ctx.status_byte = SLAVE_STATUS_ERROR;
+                        xEventGroupSetBits(s_slave_ctx.operation_event_group, MOTCTRL_SLAVE_ERROR_BIT);
+                        continue;
+                    }
+                    
+                    // Only process data of exact expected size
                     if (s_slave_ctx.rx_len == WIRE_PKG_SIZE) {
+                        // Log last few bytes to check CRC position
+                        ESP_LOGI_THREAD(TAG, "Last 4 bytes: %02X %02X %02X %02X", 
+                                      s_slave_ctx.rx_buffer[s_slave_ctx.rx_len-4],
+                                      s_slave_ctx.rx_buffer[s_slave_ctx.rx_len-3], 
+                                      s_slave_ctx.rx_buffer[s_slave_ctx.rx_len-2],
+                                      s_slave_ctx.rx_buffer[s_slave_ctx.rx_len-1]);
+                        
                         uint16_t received_crc;
                         esp_err_t ret = deserialize_pkg(s_slave_ctx.rx_buffer, s_slave_ctx.rx_len, 
                                                        &s_slave_ctx.received_pkg, &received_crc);
@@ -331,6 +356,7 @@ static void i2c_slave_task(void *pvParameters)
                             ESP_LOGE_THREAD(TAG, "Failed to deserialize package: %s", esp_err_to_name(ret));
                             s_slave_ctx.status_byte = SLAVE_STATUS_ERROR;
                             xEventGroupSetBits(s_slave_ctx.operation_event_group, MOTCTRL_SLAVE_ERROR_BIT);
+                            // Note: v2 driver handles receive automatically
                             continue;
                         }
                         
@@ -341,6 +367,7 @@ static void i2c_slave_task(void *pvParameters)
                                       received_crc, calculated_crc);
                             s_slave_ctx.status_byte = SLAVE_STATUS_ERROR;
                             xEventGroupSetBits(s_slave_ctx.operation_event_group, MOTCTRL_SLAVE_ERROR_BIT);
+                            // Note: v2 driver handles receive automatically
                             continue;
                         }
                         
@@ -350,6 +377,8 @@ static void i2c_slave_task(void *pvParameters)
                         s_slave_ctx.status_byte = SLAVE_STATUS_WORKING;
                         xEventGroupSetBits(s_slave_ctx.operation_event_group, MOTCTRL_SLAVE_PKG_RECEIVED_BIT);
                     }
+                    
+                    // Note: v2 driver handles receive automatically - no manual restart needed
                     break;
                 }
                 
@@ -373,12 +402,12 @@ static void i2c_slave_task(void *pvParameters)
                         ESP_LOGD_THREAD(TAG, "Sending status byte: 0x%02X", s_slave_ctx.status_byte);
                     }
                     
-                    // FIXED: Use i2c_slave_transmit instead of i2c_slave_write
-                    uint32_t actual_written = 0;
+                    // FIXED: Use i2c_slave_write (correct function for v2 driver)
+                    uint32_t write_len = 0;
                     esp_err_t ret = i2c_slave_write(s_slave_ctx.dev_handle, 
                                                     data_to_send, 
                                                     data_len, 
-                                                    &actual_written,  // Add this parameter
+                                                    &write_len,
                                                     1000); 
                     
                     if (ret != ESP_OK) {

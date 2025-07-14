@@ -9,7 +9,7 @@
 #include "freertos/event_groups.h"
 
 // Comment out to test as SLAVE, uncomment for MASTER
-// #define TEST_AS_MASTER
+#define TEST_AS_MASTER
 
 #ifdef TEST_AS_MASTER
 #include "i2c_motorcontroller_master.h"  // Use wrapper instead of manager
@@ -89,8 +89,6 @@ static void i2c_master_event_callback(const i2c_mgr_event_data_t *event_data, vo
     }
 }
 
-
-
 // Test motor controller functionality
 static void test_motor_controller(void)
 {
@@ -106,11 +104,17 @@ static void test_motor_controller(void)
     motorcontroller_pkg_init_default(&pkg);
     pkg.STATE = LOWERING;
     pkg.end_depth = 100;
-    pkg.samples = 5;
-    pkg.alpha = 0.7;
-    pkg.beta = 0.3;
+    pkg.samples = 235;
+    pkg.alpha = 34323.7;
+    pkg.beta = 5634.3;
     pkg.prev_estimated_cm_per_s = 5000; // 50.00 cm/s
     pkg.rising_timeout_percent = 20;
+    
+    // Add some static points for testing
+    pkg.static_points[0] = 100;
+    pkg.static_points[1] = 200;
+    pkg.static_points[2] = 400;
+    for(int i = 0; i< 79; ++i) pkg.static_points[i] = 10*i;
     
     ESP_LOGI_THREAD(TAG, "Sending package:");
     print_pkg(&pkg);
@@ -208,6 +212,7 @@ static void test_sensors(void)
 void app_main(void) {
     ESP_LOGI_THREAD(TAG, "=== I2C Motor Controller & Sensor Test ===");
     ESP_LOGI_THREAD(TAG, "Thread: %s", pcTaskGetName(NULL));
+    ESP_LOGI_THREAD(TAG, "ESP-IDF Version: %s", esp_get_idf_version());
     
     // Create test event group
     test_event_group = xEventGroupCreate();
@@ -219,6 +224,7 @@ void app_main(void) {
     #ifdef TEST_AS_MASTER
     /********** MASTER TEST **********/
     ESP_LOGI_THREAD(TAG, "Starting I2C MASTER test");
+    ESP_LOGI_THREAD(TAG, "Master will communicate with slave at address 0x%02X", CONFIG_MOTCTRL_I2C_ADDR);
     
     // Initialize motor controller (this also initializes the I2C manager)
     esp_err_t err = i2c_motctrl_master_init();
@@ -229,9 +235,14 @@ void app_main(void) {
     
     ESP_LOGI_THREAD(TAG, "Motor controller master initialized successfully!");
     
+    // Give slave some time to initialize
+    ESP_LOGI_THREAD(TAG, "Waiting for slave to be ready...");
+    vTaskDelay(pdMS_TO_TICKS(3000));
+    
     // Scan for devices
-    i2c_scan_physical_bus();
     ESP_LOGI_THREAD(TAG, "Scanning for I2C devices...");
+    i2c_scan_physical_bus();
+    
     bool found_any = false;
     for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
         if (i2c_master_device_is_available(addr)) {
@@ -247,9 +258,10 @@ void app_main(void) {
     
     if (!found_any) {
         ESP_LOGW_THREAD(TAG, "No I2C devices found! Check wiring and pull-up resistors.");
+        ESP_LOGW_THREAD(TAG, "Make sure the slave device is running and at address 0x%02X", CONFIG_MOTCTRL_I2C_ADDR);
     }
     
-    // Test motor controller
+    // Test motor controller communication
     ESP_LOGI_THREAD(TAG, "Testing motor controller communication...");
     test_motor_controller();
     
@@ -260,13 +272,21 @@ void app_main(void) {
     
     // Keep running for monitoring
     while (true) {
-        vTaskDelay(pdMS_TO_TICKS(5000));
-        ESP_LOGI_THREAD(TAG, "Master still running...");
+        vTaskDelay(pdMS_TO_TICKS(10000));
+        ESP_LOGI_THREAD(TAG, "Master still running... Checking devices...");
+        
+        // Periodic device check
+        if (i2c_master_device_is_available(CONFIG_MOTCTRL_I2C_ADDR)) {
+            ESP_LOGI_THREAD(TAG, "Motor controller still available at 0x%02X", CONFIG_MOTCTRL_I2C_ADDR);
+        } else {
+            ESP_LOGW_THREAD(TAG, "Motor controller not responding at 0x%02X", CONFIG_MOTCTRL_I2C_ADDR);
+        }
     }
     
     #else
     /********** SLAVE TEST **********/
     ESP_LOGI_THREAD(TAG, "Starting I2C SLAVE test");
+    ESP_LOGI_THREAD(TAG, "Slave will listen at address 0x%02X", CONFIG_MOTCTRL_I2C_ADDR);
     
     // Install slave driver
     esp_err_t err = i2c_install_slave_driver_config();
@@ -278,10 +298,12 @@ void app_main(void) {
     ESP_LOGI_THREAD(TAG, "Slave initialized, ready to receive commands");
     
     // Main slave loop
+    int transaction_count = 0;
     while (true) {
         motorcontroller_pkg_t pkg;
         int timeout_sec = 30;
-        ESP_LOGI_THREAD(TAG, "Waiting for package (timeout: %d seconds)...", timeout_sec);
+        ESP_LOGI_THREAD(TAG, "Waiting for package #%d (timeout: %d seconds)...", 
+                       transaction_count + 1, timeout_sec);
         
         err = i2c_motctrl_slave_wait_pkg(&pkg, timeout_sec);
         if (err == ESP_ERR_TIMEOUT) {
@@ -293,6 +315,8 @@ void app_main(void) {
             continue;
         }
         
+        transaction_count++;
+        ESP_LOGI_THREAD(TAG, "=== Transaction #%d ===", transaction_count);
         ESP_LOGI_THREAD(TAG, "Received package:");
         print_pkg(&pkg);
         
@@ -304,11 +328,17 @@ void app_main(void) {
             (pkg.end_depth * 1000) / (pkg.prev_estimated_cm_per_s / 100) : 5000;
         
         // Clamp work time to reasonable limits
-        if (work_time_ms > 10000) work_time_ms = 10000;
-        if (work_time_ms < 2000) work_time_ms = 2000;
+        if (work_time_ms > 15000) work_time_ms = 15000;  // Max 15 seconds
+        if (work_time_ms < 2000) work_time_ms = 2000;    // Min 2 seconds
         
         ESP_LOGI_THREAD(TAG, "Simulating motor work for %d ms...", work_time_ms);
-        vTaskDelay(pdMS_TO_TICKS(work_time_ms));
+        
+        // Simulate work with periodic status updates
+        int progress_updates = work_time_ms / 1000;
+        for (int i = 0; i < progress_updates; i++) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            ESP_LOGI_THREAD(TAG, "Work progress: %d/%d seconds", i + 1, progress_updates);
+        }
         
         // Prepare response
         motorcontroller_response_t resp;
@@ -330,7 +360,7 @@ void app_main(void) {
                 response_sent = true;
                 break;
             }
-            ESP_LOGW_THREAD(TAG, "Attempt %d failed: %s", i + 1, esp_err_to_name(err));
+            ESP_LOGW_THREAD(TAG, "Response send attempt %d failed: %s", i + 1, esp_err_to_name(err));
             vTaskDelay(pdMS_TO_TICKS(500));
         }
         
@@ -338,7 +368,7 @@ void app_main(void) {
             ESP_LOGE_THREAD(TAG, "Failed to send response after 5 attempts");
         }
         
-        ESP_LOGI_THREAD(TAG, "=== Transaction complete, ready for next command ===\n");
+        ESP_LOGI_THREAD(TAG, "=== Transaction #%d complete, ready for next command ===\n", transaction_count);
     }
     
     #endif
