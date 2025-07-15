@@ -10,35 +10,11 @@
 extern "C" {
 #endif
 
-// Manager operation result
-typedef struct {
-    esp_err_t result;
-    worker_status_t final_status;
-    uint32_t work_result;
-    uint32_t operation_time_ms;
-} motctrl_operation_result_t;
+esp_err_t start_worker(const motorcontroller_pkg_t *pkg, uint32_t timeout_ms, uint8_t retries);
 
-/**
- * @brief Initialize the motor controller manager
- * @return ESP_OK on success
- */
-esp_err_t motctrl_manager_init(void);
+esp_err_t wait_for_worker(motorcontroller_response_t *resp, uint32_t wait_offset_ms, uint32_t timeout_ms);
 
-/**
- * @brief Execute a work command on the worker
- * @param timeout_ms Total timeout for the operation
- * @param result Pointer to store operation result
- * @return ESP_OK on success
- */
-esp_err_t motctrl_manager_execute_work(uint32_t timeout_ms, motctrl_operation_result_t *result);
-
-/**
- * @brief Check worker status
- * @param status Pointer to store worker status
- * @param timeout_ms Timeout for status request
- * @return ESP_OK on success
- */
-esp_err_t motctrl_manager_check_status(worker_status_t *status, uint32_t timeout_ms);
+void manager_task(void *arg);
 
 #ifdef __cplusplus
 }

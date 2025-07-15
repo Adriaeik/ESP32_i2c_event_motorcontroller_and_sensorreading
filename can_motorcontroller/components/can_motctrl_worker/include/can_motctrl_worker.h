@@ -8,43 +8,11 @@
 extern "C" {
 #endif
 
-// Worker configuration
-typedef struct {
-    uint32_t work_simulation_time_ms;   // How long to simulate work
-    uint32_t status_poll_interval_ms;   // How often to check for status requests
-    bool auto_start;                     // Start worker task automatically
-} motctrl_worker_config_t;
+esp_err_t receive_work_package(motorcontroller_pkg_t *pkg, uint32_t timeout_ms);
 
-/**
- * @brief Initialize the motor controller worker
- * @param config Worker configuration
- * @return ESP_OK on success
- */
-esp_err_t motctrl_worker_init(const motctrl_worker_config_t *config);
+esp_err_t send_work_response(const motorcontroller_response_t *resp, uint32_t timeout_ms, uint8_t retries);
 
-/**
- * @brief Deinitialize the motor controller worker
- * @return ESP_OK on success
- */
-esp_err_t motctrl_worker_deinit(void);
-
-/**
- * @brief Start the worker task
- * @return ESP_OK on success
- */
-esp_err_t motctrl_worker_start(void);
-
-/**
- * @brief Stop the worker task
- * @return ESP_OK on success
- */
-esp_err_t motctrl_worker_stop(void);
-
-/**
- * @brief Get current worker status
- * @return Current worker status
- */
-worker_status_t motctrl_worker_get_status(void);
+void worker_task(void *arg);
 
 #ifdef __cplusplus
 }
