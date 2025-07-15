@@ -1,0 +1,41 @@
+{
+  "C_Cpp.intelliSenseEngine": "default",
+  "idf.espIdfPathWin": "C:\\Users\\eikel\\esp\\v5.5\\esp-idf",
+  "idf.pythonInstallPath": "C:\\Users\\eikel\\.espressif\\tools\\idf-python\\3.11.2\\python.exe",
+  "idf.openOcdConfigs": [
+    "board/esp32-wrover-kit-3.3v.cfg"
+  ],
+  "idf.toolsPathWin": "C:\\Users\\eikel\\.espressif",
+  "idf.customExtraVars": {
+    "IDF_TARGET": "esp32"
+  },
+  "clangd.path": "C:\\Users\\eikel\\.espressif\\tools\\esp-clang\\esp-18.1.2_20240912\\esp-clang\\bin\\clangd.exe",
+  "clangd.arguments": [
+    "--background-index",
+    "--query-driver=C:\\Users\\eikel\\.espressif\\tools\\xtensa-esp-elf\\esp-14.2.0_20241119\\xtensa-esp-elf\\bin\\xtensa-esp32-elf-gcc.exe",
+    "--compile-commands-dir=${workspaceFolder}\\build"
+  ],
+  "files.associations": {
+    "buoye_structs.h": "c",
+    "esp_timer.h": "c",
+    "i2c_motorcontroller_slave.h": "c",
+    "soc_caps.h": "c",
+    "task.h": "c",
+    "serde_helper.h": "c",
+    "functional": "c",
+    "i2c_motorcontroller_master.h": "c",
+    "i2c_master_manager.h": "c",
+    "queue.h": "c",
+    "i2c_slave.h": "c",
+    "freertos.h": "c",
+    "compare": "c",
+    "cstdint": "c",
+    "can_bus_manager.h": "c",
+    "can_motctrl_config.h": "c",
+    "stdbool.h": "c",
+    "can_motctrl_worker.h": "c",
+    "esp_err.h": "c"
+  },
+  "idf.flashType": "UART",
+  "idf.portWin": "COM4"
+}

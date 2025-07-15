@@ -1,0 +1,93 @@
+menu "BUOYE STRUCTS Configuration"
+
+    config USE_TROLL_DATA
+        bool "Use extra structs for modbusdata"
+        default y
+        help
+            /if you are using this component for modem, deselect this
+    
+    menu "Default Configuration"
+
+    menu "buoye_config_t"
+
+        config DEFAULT_TIME_TO_START_WORK
+            int "Default current_time_to_start_work (epoch)"
+            default 0
+
+        config DEFAULT_TIME_TO_START_NEXT_WORK
+            int "Default time_to_start_next_work (epoch)"
+            default 0
+
+        menu "sheared_config_t"
+
+            config DEFAULT_PERIODIC_TIME_SEC
+                int "Default periodic time (s)"
+                default 300
+
+            config DEFAULT_SERVICE_FLAG
+                bool "Enable service flag by default"
+                default n
+
+            config DEFAULT_SERVICE_TIME
+                int "Default service time (epoch)"
+                default 0
+
+            menu "poll_config_t"
+
+                config DEFAULT_POLL_TYPE
+                    int "Default poll type"
+                    default 0
+
+                config DEFAULT_TIMEOUT
+                    int "Default timeout (s)"
+                    default 60
+
+                config DEFAULT_START_DEPTH
+                    int "Default start depth (cm)"
+                    default 0
+
+                config DEFAULT_END_DEPTH
+                    int "Default end depth (cm)"
+                    default 600
+
+                config DEFAULT_SAMPLE_COUNT
+                    int "Default sample count"
+                    default 3
+
+                config DEFAULT_STATIC_POLL_PERIOD
+                    int "Default poll period between static samples"
+                    default 10
+
+                config DEFAULT_STATIC_POINTS
+                    string "Default points to measure in static mode"
+                    default "10,25,67,90,43,62"
+
+
+            endmenu # poll_config_t
+
+        endmenu # sheared_config_t
+
+    endmenu # buoye_config_t
+
+    menu "sheared_status_t"
+
+        config DEFAULT_BATTERY_LEVEL
+            int "Default battery level (%)"
+            default 100
+
+        config DEFAULT_CLOCK_ERROR
+            int "Default clock error (s)"
+            default 0
+
+        config DEFAULT_ESTIMATED_DEPTH
+            int "Default estimated depth (cm)"
+            default 0
+
+        config DEFAULT_TIME_TO_START_CYCLE
+            int "Default time to start cycle (epoch)"
+            default 0
+
+    endmenu # sheared_status_t
+
+    endmenu # Default Configuration
+endmenu

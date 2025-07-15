@@ -195,6 +195,30 @@ esp_err_t i2c_master_queue_operation(const i2c_operation_t *operation)
 
 esp_err_t i2c_master_sensor_read_reg(uint8_t device_addr, uint8_t reg_addr, uint8_t *data, size_t len, uint32_t timeout_ms)
 {
+    i2c_master_dev_handle_t device_handle = i2c_master_get_device_handle(device_addr);
+    if (device_handle == NULL) {
+        ESP_LOGE(TAG, "I2C-enhet 0x%02X ikkje funnen", device_addr);
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    uint8_t who_am_i_reg = 0x0F;
+    uint8_t who_am_i     = 0;
+    esp_err_t err = i2c_master_transmit_receive(
+        device_handle,
+        &who_am_i_reg,      // skriv adresse 0x0F
+        1,                  // 1 byte
+        &who_am_i,          // les 1 byte
+        1,
+        pdMS_TO_TICKS(100)  // kort timeout for test
+    );
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Feil ved WHO_AM_I-lesing: %s", esp_err_to_name(err));
+        // Du kan velje om du vil feile heile funksjonen her,
+        // eller berre logge og gå vidare til ordinær kø-operasjon.
+        return err;
+    }
+    ESP_LOGI(TAG, "WHO_AM_I = 0x%02X", who_am_i);
+
     i2c_operation_t operation = {
         .op_type = I2C_OP_TYPE_SENSOR_READ,
         .device_addr = device_addr,
@@ -401,20 +425,19 @@ static esp_err_t i2c_master_execute_operation(i2c_operation_t *operation)
         case I2C_OP_TYPE_SENSOR_READ:
         {
             // Read from sensor register
-            ret = i2c_master_transmit_receive(
+            ESP_LOGW(TAG, "Entered I2C_OP_TYPE_SENSOR_READ");
+            uint8_t reg = operation->sensor.reg_addr;  // autoincrement
+            esp_err_t r = i2c_master_transmit_receive(
                 device_handle,
-                &operation->sensor.reg_addr, 1,
+                &reg, 1,
                 operation->sensor.read_buffer, operation->sensor.read_len,
                 operation->timeout_ms
             );
             
-            if (ret != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to read from sensor register 0x%02X: %s", 
-                        operation->sensor.reg_addr, esp_err_to_name(ret));
-            } else {
-                ESP_LOGD(TAG, "Read %d bytes from sensor register 0x%02X", 
+                ESP_LOG_BUFFER_HEX_LEVEL(TAG, operation->sensor.read_buffer, operation->sensor.read_len, ESP_LOG_INFO);
+                ESP_LOGI(TAG, "Read %d bytes from sensor register 0x%02X", 
                         operation->sensor.read_len, operation->sensor.reg_addr);
-            }
+            
             break;
         }
         

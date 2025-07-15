@@ -1,0 +1,65 @@
+menu "CAN Bus Manager Configuration"
+
+    config CAN_TX_GPIO
+        int "CAN TX GPIO Pin"
+        default 25
+        range 0 39
+        help
+            GPIO pin for CAN TX signal.
+            
+    config CAN_RX_GPIO
+        int "CAN RX GPIO Pin"
+        default 26
+        range 0 39
+        help
+            GPIO pin for CAN RX signal.
+            
+    config CAN_BUS_BITRATE
+        int "CAN Bus Bitrate (bps)"
+        default 500000
+        help
+            CAN bus bitrate in bits per second.
+            Common values: 125000, 250000, 500000, 1000000
+            
+    config CAN_BUS_TX_QUEUE_SIZE
+        int "TX Queue Size"
+        default 16
+        range 4 64
+        help
+            Size of transmit queue for each priority level.
+            
+    config CAN_BUS_RX_QUEUE_SIZE
+        int "RX Queue Size"  
+        default 32
+        range 8 128
+        help
+            Size of receive queue.
+            
+    config CAN_BUS_ENABLE_STATISTICS
+        bool "Enable Bus Statistics"
+        default y
+        help
+            Enable collection of bus statistics (messages sent/received, errors, etc.).
+            
+    config CAN_BUS_WATCHDOG_INTERVAL_MS
+        int "Watchdog Interval (ms)"
+        default 1000
+        range 100 10000
+        help
+            Interval for bus health monitoring and statistics logging.
+            
+    config CAN_BUS_RECOVERY_DELAY_MS
+        int "Bus Recovery Delay (ms)"
+        default 500
+        range 100 5000
+        help
+            Delay before attempting bus recovery after bus-off condition.
+            
+    config CAN_BUS_STARVATION_THRESHOLD
+        int "Priority Starvation Threshold"
+        default 10
+        range 5 50
+        help
+            Number of higher priority messages before forcing lower priority message.
+            
+endmenu

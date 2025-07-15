@@ -1,0 +1,6 @@
+source "C:/Users/eikel/esp/v5.4.1/esp-idf/components/bootloader/Kconfig.projbuild"
+source "C:/Users/eikel/esp/v5.4.1/esp-idf/components/esp_app_format/Kconfig.projbuild"
+source "C:/Users/eikel/esp/v5.4.1/esp-idf/components/esp_rom/Kconfig.projbuild"
+source "C:/Users/eikel/esp/v5.4.1/esp-idf/components/esptool_py/Kconfig.projbuild"
+source "C:/Users/eikel/esp/v5.4.1/esp-idf/components/partition_table/Kconfig.projbuild"
+source "C:/Users/eikel/Documents/Saetren/ESP32_i2c_event_motorcontroller_and_sensorreading/twai_network_slave/main/Kconfig.projbuild"

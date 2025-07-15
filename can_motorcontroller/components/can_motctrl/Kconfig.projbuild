@@ -1,0 +1,61 @@
+menu "CAN Motor Controller Configuration"
+
+    config CAN_MOTCTRL_DEFAULT_TIMEOUT_SEC
+        int "Default Operation Timeout (seconds)"
+        default 30
+        range 10 1800
+        help
+            Default timeout for motor controller operations.
+            
+    config CAN_MOTCTRL_MIN_TIMEOUT_SEC
+        int "Minimum Operation Timeout (seconds)"
+        default 10
+        range 5 60
+        help
+            Minimum allowed timeout for motor controller operations.
+            
+    config CAN_MOTCTRL_MAX_TIMEOUT_SEC
+        int "Maximum Operation Timeout (seconds)"
+        default 1800
+        range 60 3600
+        help
+            Maximum allowed timeout for motor controller operations (30 minutes default).
+            
+    config CAN_MOTCTRL_FRAGMENT_BUFFER_SIZE
+        int "Fragment Buffer Size (bytes)"
+        default 1024
+        range 256 4096
+        help
+            Size of buffer for assembling fragmented messages.
+            
+    config CAN_MOTCTRL_ENABLE_DEBUG
+        bool "Enable Motor Controller Debug"
+        default y
+        help
+            Enable debug features like message tracing and performance monitoring.
+            
+    config CAN_MOTCTRL_TRACE_BUFFER_SIZE
+        int "Debug Trace Buffer Size (entries)"
+        default 1000
+        range 100 5000
+        depends on CAN_MOTCTRL_ENABLE_DEBUG
+        help
+            Number of debug trace entries to keep in memory.
+            
+    config CAN_MOTCTRL_ERROR_BUFFER_SIZE
+        int "Error Trace Buffer Size (entries)"
+        default 100
+        range 10 500
+        depends on CAN_MOTCTRL_ENABLE_DEBUG
+        help
+            Number of error trace entries to keep in memory.
+            
+    config CAN_MOTCTRL_PERFORMANCE_WINDOW_MS
+        int "Performance Monitoring Window (ms)"
+        default 10000
+        range 1000 60000
+        depends on CAN_MOTCTRL_ENABLE_DEBUG
+        help
+            Time window for performance metrics calculation.
+            
+endmenu

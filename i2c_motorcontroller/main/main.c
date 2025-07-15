@@ -163,10 +163,26 @@ static void test_sensors(void)
         uint8_t who_am_i = 0;
         xEventGroupClearBits(test_event_group, TEST_COMPLETE_BIT | TEST_ERROR_BIT);
         
-        esp_err_t err = i2c_master_sensor_read_reg(CONFIG_LSM6DS032TR_I2C_ADDR, 0x0F, &who_am_i, 1, 1000);
-        if (err != ESP_OK) {
-            ESP_LOGE_THREAD(TAG, "Failed to queue sensor read: %s", esp_err_to_name(err));
-        } else {
+       uint8_t raw[12];
+    esp_err_t err = i2c_master_sensor_read_reg(
+        CONFIG_LSM6DS032TR_I2C_ADDR,
+        0x22,   // start på OUTX_L_G med autoincrement
+        raw,           // buffer for dei 12 bytea
+        12,            // tal byte
+        1000           // timeout i ms
+    );
+
+    // Slå saman LSB/MSB til int16_t
+    int16_t gyro[3], accel[3];
+    for (int i = 0; i < 3; i++) {
+        gyro[i]  = (int16_t)(raw[2*i]   | (raw[2*i+1]   << 8));
+        accel[i] = (int16_t)(raw[6+2*i] | (raw[6+2*i+1] << 8));
+    }
+
+    // Skriv ut
+    ESP_LOGI(TAG, "Gyro  (dps): X=%d, Y=%d, Z=%d", gyro[0],  gyro[1],  gyro[2]);
+    ESP_LOGI(TAG, "Accel (mg) : X=%d, Y=%d, Z=%d", accel[0], accel[1], accel[2]);
+
             // Wait for completion
             EventBits_t bits = xEventGroupWaitBits(test_event_group, TEST_COMPLETE_BIT | TEST_ERROR_BIT, 
                                                   pdTRUE, pdFALSE, pdMS_TO_TICKS(5000));
@@ -176,7 +192,7 @@ static void test_sensors(void)
             } else {
                 ESP_LOGE_THREAD(TAG, "Failed to read from LSM6DS032TR sensor");
             }
-        }
+        
     }
 #else
     ESP_LOGI_THREAD(TAG, "LSM6DS032TR sensor not enabled in menuconfig");
