@@ -1,517 +1,284 @@
+// components/motctrl_worker/motctrl_worker.c
 #include "can_motctrl_worker.h"
-#include "can_bus_manager.h"
-#include "can_serde_helper.h"
 #include "esp_log.h"
-#include "driver/twai.h"
-#include "sdkconfig.h"
-#include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
 
-static const char *TAG = "can_motctrl_worker";
+static const char *TAG = "motctrl_worker";
 
-static can_motctrl_worker_ctx_t s_worker_ctx = {0};
+// Worker state
+static bool initialized = false;
+static TaskHandle_t worker_task_handle = NULL;
+static worker_status_t current_status = WORKER_STATUS_IDLE;
+static SemaphoreHandle_t status_mutex = NULL;
+static motctrl_worker_config_t worker_config = {0};
 
+// Internal functions
+static void worker_task(void *pvParameters);
+static esp_err_t handle_status_request(void);
+static esp_err_t process_work_package(const motorcontroller_pkg_t *pkg);
+static void set_worker_status(worker_status_t new_status);
 
-// Forward declarations
-static void can_worker_task(void *pvParameters);
-static esp_err_t send_status_response(void);
-static esp_err_t send_motorcontroller_response(void);
-static esp_err_t process_package_frame(const twai_message_t *message);
-
-// Callback for CAN bus manager events
-static void worker_can_event_callback(const can_bus_event_data_t *event_data, void *user_data)
+static void set_worker_status(worker_status_t new_status)
 {
-    // Filter for motor controller messages
-    if (event_data->message.identifier < CAN_ID_MOTCTRL_PKG_START || 
-        event_data->message.identifier > CAN_ID_MOTCTRL_RESP_END) {
-        return; // Not our message
-    }
-    
-    switch (event_data->event_type) {
-        case CAN_BUS_EVT_MESSAGE_RECEIVED:
-            // Forward relevant messages to our processing queue
-            if (event_data->message.identifier >= CAN_ID_MOTCTRL_PKG_START && 
-                event_data->message.identifier <= CAN_ID_MOTCTRL_STATUS_REQ) {
-                
-                if (s_worker_ctx.can_rx_queue != NULL) {
-                    xQueueSend(s_worker_ctx.can_rx_queue, &event_data->message, 0);
-                }
+    if (xSemaphoreTake(status_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        if (current_status != new_status) {
+            current_status = new_status;
+            
+            const char* status_str;
+            switch (new_status) {
+                case WORKER_STATUS_IDLE: status_str = "IDLE"; break;
+                case WORKER_STATUS_READY: status_str = "READY"; break;
+                case WORKER_STATUS_WORKING: status_str = "WORKING"; break;
+                case WORKER_STATUS_RESP_READY: status_str = "RESP_READY"; break;
+                case WORKER_STATUS_ERROR: status_str = "ERROR"; break;
+                default: status_str = "UNKNOWN"; break;
             }
-            break;
-            
-        case CAN_BUS_EVT_MESSAGE_SENT:
-            ESP_LOGD(TAG, "CAN message sent successfully: ID 0x%lx", event_data->message.identifier);
-            // Handle specific sent message confirmations if needed
-            break;
-            
-        case CAN_BUS_EVT_ERROR:
-            ESP_LOGE(TAG, "CAN bus error: %s", esp_err_to_name(event_data->error_code));
-            if (s_worker_ctx.operation_event_group != NULL) {
-                xEventGroupSetBits(s_worker_ctx.operation_event_group, MOTCTRL_WORKER_ERROR_BIT);
-            }
-            break;
-            
-        case CAN_BUS_EVT_TIMEOUT:
-            ESP_LOGW(TAG, "CAN operation timeout");
-            break;
-            
-        case CAN_BUS_EVT_BUS_RECOVERED:
-            ESP_LOGI(TAG, "CAN bus recovered");
-            break;
-            
-        default:
-            break;
+            ESP_LOGI(TAG, "Status changed to: %s", status_str);
+        }
+        xSemaphoreGive(status_mutex);
     }
 }
 
-esp_err_t can_motctrl_worker_init(void)
+static esp_err_t handle_status_request(void)
 {
-    if (s_worker_ctx.initialized) {
-        ESP_LOGW(TAG, "Worker already initialized");
-        return ESP_OK;
+    worker_status_t status = motctrl_worker_get_status();
+    esp_err_t ret = motctrl_send_status_response(status, 1000);
+    
+    if (ret == ESP_OK) {
+        ESP_LOGD(TAG, "Sent status response: %d", status);
+    } else {
+        ESP_LOGE(TAG, "Failed to send status response: %s", esp_err_to_name(ret));
     }
+    
+    return ret;
+}
 
-    // Initialize worker context
-    memset(&s_worker_ctx, 0, sizeof(s_worker_ctx));
-    s_worker_ctx.state = CAN_WORKER_STATE_IDLE;
-    s_worker_ctx.status_byte = WORKER_STATUS_IDLE;
-
-    // Create event queue
-    s_worker_ctx.event_queue = xQueueCreate(16, sizeof(can_worker_event_t));
-    if (s_worker_ctx.event_queue == NULL) {
-        ESP_LOGE(TAG, "Failed to create event queue");
-        return ESP_ERR_NO_MEM;
+static esp_err_t process_work_package(const motorcontroller_pkg_t *pkg)
+{
+    ESP_LOGI(TAG, "Processing work package...");
+    
+    // Change status to working
+    set_worker_status(WORKER_STATUS_WORKING);
+    
+    // Simulate work
+    ESP_LOGI(TAG, "Simulating work for %d ms...", worker_config.work_simulation_time_ms);
+    
+    uint32_t work_chunks = worker_config.work_simulation_time_ms / 100; // 100ms chunks
+    for (uint32_t i = 0; i < work_chunks; i++) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        
+        // Check for status requests during work
+        can_message_t msg;
+        if (can_bus_receive_message(&msg, 0) == ESP_OK) { // Non-blocking receive
+            if (msg.identifier == CAN_ID_MOTCTRL_STATUS_REQ) {
+                handle_status_request();
+            }
+        }
+        
+        // Log progress
+        if (i % 10 == 0) {
+            ESP_LOGI(TAG, "Work progress: %d%%", (i * 100) / work_chunks);
+        }
     }
-
-    // Create CAN message queue for RX
-    s_worker_ctx.can_rx_queue = xQueueCreate(32, sizeof(twai_message_t));
-    if (s_worker_ctx.can_rx_queue == NULL) {
-        ESP_LOGE(TAG, "Failed to create CAN RX queue");
-        vQueueDelete(s_worker_ctx.event_queue);
-        return ESP_ERR_NO_MEM;
+    
+    // Handle any remaining time
+    uint32_t remaining_ms = worker_config.work_simulation_time_ms % 100;
+    if (remaining_ms > 0) {
+        vTaskDelay(pdMS_TO_TICKS(remaining_ms));
     }
-
-    // Create operation event group
-    s_worker_ctx.operation_event_group = xEventGroupCreate();
-    if (s_worker_ctx.operation_event_group == NULL) {
-        ESP_LOGE(TAG, "Failed to create operation event group");
-        vQueueDelete(s_worker_ctx.event_queue);
-        vQueueDelete(s_worker_ctx.can_rx_queue);
-        return ESP_ERR_NO_MEM;
-    }
-
-    // Initialize fragment assembly buffer
-    s_worker_ctx.fragment_buffer = malloc(MAX_FRAGMENT_SIZE);
-    if (s_worker_ctx.fragment_buffer == NULL) {
-        ESP_LOGE(TAG, "Failed to allocate fragment buffer");
-        vEventGroupDelete(s_worker_ctx.operation_event_group);
-        vQueueDelete(s_worker_ctx.event_queue);
-        vQueueDelete(s_worker_ctx.can_rx_queue);
-        return ESP_ERR_NO_MEM;
-    }
-
-    // Initialize CAN bus manager with our callback
-    esp_err_t ret = can_bus_manager_init(worker_can_event_callback, NULL);
+    
+    ESP_LOGI(TAG, "Work simulation completed");
+    
+    // Create and send response
+    motorcontroller_response_t response;
+    esp_err_t ret = motctrl_create_work_response(&response, 0); // 0 = success
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize CAN bus manager: %s", esp_err_to_name(ret));
-        free(s_worker_ctx.fragment_buffer);
-        vEventGroupDelete(s_worker_ctx.operation_event_group);
-        vQueueDelete(s_worker_ctx.event_queue);
-        vQueueDelete(s_worker_ctx.can_rx_queue);
+        ESP_LOGE(TAG, "Failed to create work response");
+        set_worker_status(WORKER_STATUS_ERROR);
         return ret;
     }
+    
+    // Change status to response ready
+    set_worker_status(WORKER_STATUS_RESP_READY);
+    
+    ESP_LOGI(TAG, "Sending work response...");
+    ret = motctrl_send_response(&response, 5000);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to send work response: %s", esp_err_to_name(ret));
+        set_worker_status(WORKER_STATUS_ERROR);
+        return ret;
+    }
+    
+    ESP_LOGI(TAG, "Work response sent successfully");
+    
+    // Return to ready state
+    set_worker_status(WORKER_STATUS_READY);
+    return ESP_OK;
+}
 
-    // Create worker task
-    BaseType_t task_ret = xTaskCreate(
-        can_worker_task,
-        "can_worker",
+static void worker_task(void *pvParameters)
+{
+    ESP_LOGI(TAG, "Worker task started");
+    set_worker_status(WORKER_STATUS_READY);
+    
+    while (1) {
+        can_message_t msg;
+        
+        // Wait for incoming messages
+        esp_err_t ret = can_bus_receive_message(&msg, pdMS_TO_TICKS(worker_config.status_poll_interval_ms));
+        
+        if (ret == ESP_OK) {
+            if (msg.identifier == CAN_ID_MOTCTRL_STATUS_REQ) {
+                // Handle status request
+                handle_status_request();
+            }
+            else if (msg.identifier == CAN_ID_MOTCTRL_PKG_START) {
+                // Start of work package
+                ESP_LOGI(TAG, "Received work package start frame");
+                
+                motorcontroller_pkg_t pkg;
+                ret = motctrl_receive_package(&pkg, 10000); // 10 second timeout for full package
+                
+                if (ret == ESP_OK) {
+                    ESP_LOGI(TAG, "Work package received successfully");
+                    process_work_package(&pkg);
+                } else {
+                    ESP_LOGE(TAG, "Failed to receive complete work package: %s", esp_err_to_name(ret));
+                    set_worker_status(WORKER_STATUS_ERROR);
+                    
+                    // Brief delay before returning to ready
+                    vTaskDelay(pdMS_TO_TICKS(1000));
+                    set_worker_status(WORKER_STATUS_READY);
+                }
+            }
+            else {
+                ESP_LOGD(TAG, "Received unexpected message ID: 0x%x", msg.identifier);
+            }
+        }
+        else if (ret == ESP_ERR_TIMEOUT) {
+            // Normal timeout - continue loop
+            ESP_LOGD(TAG, "Worker task timeout - continuing");
+        }
+        else {
+            ESP_LOGE(TAG, "Error receiving message: %s", esp_err_to_name(ret));
+            vTaskDelay(pdMS_TO_TICKS(1000)); // Brief delay before retry
+        }
+    }
+}
+
+esp_err_t motctrl_worker_init(const motctrl_worker_config_t *config)
+{
+    if (initialized) {
+        ESP_LOGW(TAG, "Already initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (!config) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // Copy configuration
+    worker_config = *config;
+    
+    // Set defaults if not specified
+    if (worker_config.work_simulation_time_ms == 0) {
+        worker_config.work_simulation_time_ms = 3000; // 3 seconds default
+    }
+    if (worker_config.status_poll_interval_ms == 0) {
+        worker_config.status_poll_interval_ms = 500; // 500ms default
+    }
+
+    // Create mutex for status
+    status_mutex = xSemaphoreCreateMutex();
+    if (!status_mutex) {
+        ESP_LOGE(TAG, "Failed to create status mutex");
+        return ESP_ERR_NO_MEM;
+    }
+
+    set_worker_status(WORKER_STATUS_IDLE);
+    initialized = true;
+
+    ESP_LOGI(TAG, "Worker initialized (work_time: %d ms, poll_interval: %d ms)", 
+             worker_config.work_simulation_time_ms, worker_config.status_poll_interval_ms);
+
+    if (worker_config.auto_start) {
+        return motctrl_worker_start();
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t motctrl_worker_deinit(void)
+{
+    if (!initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // Stop worker task if running
+    motctrl_worker_stop();
+
+    if (status_mutex) {
+        vSemaphoreDelete(status_mutex);
+        status_mutex = NULL;
+    }
+
+    initialized = false;
+    ESP_LOGI(TAG, "Worker deinitialized");
+    return ESP_OK;
+}
+
+esp_err_t motctrl_worker_start(void)
+{
+    if (!initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (worker_task_handle != NULL) {
+        ESP_LOGW(TAG, "Worker task already running");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    BaseType_t result = xTaskCreate(
+        worker_task,
+        "motctrl_worker",
         4096,
         NULL,
         5,
-        &s_worker_ctx.worker_task_handle
+        &worker_task_handle
     );
 
-    if (task_ret != pdPASS) {
+    if (result != pdPASS) {
         ESP_LOGE(TAG, "Failed to create worker task");
-        can_bus_manager_deinit();
-        free(s_worker_ctx.fragment_buffer);
-        vEventGroupDelete(s_worker_ctx.operation_event_group);
-        vQueueDelete(s_worker_ctx.event_queue);
-        vQueueDelete(s_worker_ctx.can_rx_queue);
         return ESP_ERR_NO_MEM;
     }
 
-    s_worker_ctx.initialized = true;
-    ESP_LOGI(TAG, "CAN motor controller worker initialized successfully");
+    ESP_LOGI(TAG, "Worker task started");
     return ESP_OK;
 }
 
-esp_err_t can_motctrl_worker_deinit(void)
+esp_err_t motctrl_worker_stop(void)
 {
-    if (!s_worker_ctx.initialized) {
-        return ESP_OK;
+    if (worker_task_handle != NULL) {
+        vTaskDelete(worker_task_handle);
+        worker_task_handle = NULL;
+        set_worker_status(WORKER_STATUS_IDLE);
+        ESP_LOGI(TAG, "Worker task stopped");
     }
 
-    // Stop worker task
-    if (s_worker_ctx.worker_task_handle != NULL) {
-        vTaskDelete(s_worker_ctx.worker_task_handle);
-        s_worker_ctx.worker_task_handle = NULL;
-    }
-
-    // Deinitialize CAN bus manager
-    can_bus_manager_deinit();
-
-    // Clean up resources
-    if (s_worker_ctx.fragment_buffer != NULL) {
-        free(s_worker_ctx.fragment_buffer);
-        s_worker_ctx.fragment_buffer = NULL;
-    }
-
-    if (s_worker_ctx.operation_event_group != NULL) {
-        vEventGroupDelete(s_worker_ctx.operation_event_group);
-        s_worker_ctx.operation_event_group = NULL;
-    }
-
-    if (s_worker_ctx.event_queue != NULL) {
-        vQueueDelete(s_worker_ctx.event_queue);
-        s_worker_ctx.event_queue = NULL;
-    }
-
-    if (s_worker_ctx.can_rx_queue != NULL) {
-        vQueueDelete(s_worker_ctx.can_rx_queue);
-        s_worker_ctx.can_rx_queue = NULL;
-    }
-
-    s_worker_ctx.initialized = false;
-    ESP_LOGI(TAG, "CAN motor controller worker deinitialized");
     return ESP_OK;
 }
 
-esp_err_t can_motctrl_worker_wait_pkg(motorcontroller_pkg_t *pkg, int timeout_sec)
+worker_status_t motctrl_worker_get_status(void)
 {
-    if (!s_worker_ctx.initialized) {
-        ESP_LOGE(TAG, "Worker not initialized");
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    // Clear previous package flag and event bits
-    s_worker_ctx.pkg_ready = false;
-    xEventGroupClearBits(s_worker_ctx.operation_event_group, 
-                        MOTCTRL_WORKER_PKG_RECEIVED_BIT | MOTCTRL_WORKER_ERROR_BIT);
-
-    // Set state to ready
-    s_worker_ctx.state = CAN_WORKER_STATE_IDLE;
-    s_worker_ctx.status_byte = WORKER_STATUS_READY;
-
-    ESP_LOGI(TAG, "Waiting for package from manager (timeout: %d seconds)...", timeout_sec);
-
-    // Wait for package
-    EventBits_t bits = xEventGroupWaitBits(
-        s_worker_ctx.operation_event_group,
-        MOTCTRL_WORKER_PKG_RECEIVED_BIT | MOTCTRL_WORKER_ERROR_BIT,
-        pdTRUE,
-        pdFALSE,
-        pdMS_TO_TICKS(timeout_sec * 1000)
-    );
-
-    if (bits & MOTCTRL_WORKER_ERROR_BIT) {
-        ESP_LOGE(TAG, "Error while waiting for package");
-        return ESP_FAIL;
-    }
-
-    if (!(bits & MOTCTRL_WORKER_PKG_RECEIVED_BIT)) {
-        ESP_LOGW(TAG, "Package wait timeout");
-        s_worker_ctx.state = CAN_WORKER_STATE_IDLE;
-        s_worker_ctx.status_byte = WORKER_STATUS_IDLE;
-        return ESP_ERR_TIMEOUT;
-    }
-
-    // Copy received package
-    *pkg = s_worker_ctx.received_pkg;
-    s_worker_ctx.state = CAN_WORKER_STATE_PKG_RECEIVED;
+    worker_status_t status = WORKER_STATUS_ERROR;
     
-    ESP_LOGI(TAG, "Package received successfully");
-    return ESP_OK;
-}
-
-esp_err_t can_motctrl_worker_send_response(const motorcontroller_response_t *resp, int timeout_sec)
-{
-    if (!s_worker_ctx.initialized) {
-        ESP_LOGE(TAG, "Worker not initialized");
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    // Prepare response
-    s_worker_ctx.response_to_send = *resp;
-    s_worker_ctx.resp_ready = true;
-    s_worker_ctx.state = CAN_WORKER_STATE_RESP_READY;
-    s_worker_ctx.status_byte = WORKER_STATUS_RESP_READY;
-
-    ESP_LOGI(TAG, "Sending response...");
-
-    // Send response immediately using bus manager
-    esp_err_t ret = send_motorcontroller_response();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to send response: %s", esp_err_to_name(ret));
-        s_worker_ctx.status_byte = WORKER_STATUS_ERROR;
-        return ret;
-    }
-
-    // Reset state
-    s_worker_ctx.state = CAN_WORKER_STATE_IDLE;
-    s_worker_ctx.status_byte = WORKER_STATUS_IDLE;
-    s_worker_ctx.resp_ready = false;
-
-    ESP_LOGI(TAG, "Response sent successfully");
-    return ESP_OK;
-}
-
-esp_err_t can_motctrl_worker_set_working(void)
-{
-    s_worker_ctx.state = CAN_WORKER_STATE_WORKING;
-    s_worker_ctx.status_byte = WORKER_STATUS_WORKING;
-    ESP_LOGI(TAG, "Worker state set to WORKING");
-    return ESP_OK;
-}
-
-esp_err_t can_motctrl_worker_set_response_ready(const motorcontroller_response_t *resp)
-{
-    s_worker_ctx.response_to_send = *resp;
-    s_worker_ctx.resp_ready = true;
-    s_worker_ctx.state = CAN_WORKER_STATE_RESP_READY;
-    s_worker_ctx.status_byte = WORKER_STATUS_RESP_READY;
-    
-    ESP_LOGI(TAG, "Response set and ready for manager");
-    return ESP_OK;
-}
-
-can_worker_state_t can_motctrl_worker_get_state(void)
-{
-    return s_worker_ctx.state;
-}
-
-bool can_motctrl_worker_is_ready(void)
-{
-    return (s_worker_ctx.initialized && s_worker_ctx.state == CAN_WORKER_STATE_IDLE);
-}
-
-static void can_worker_task(void *pvParameters)
-{
-    can_worker_event_t evt;
-    twai_message_t can_msg;
-    
-    ESP_LOGI(TAG, "CAN worker task started");
-    
-    while (s_worker_ctx.initialized) {
-        // Check for CAN messages first
-        if (xQueueReceive(s_worker_ctx.can_rx_queue, &can_msg, pdMS_TO_TICKS(10)) == pdTRUE) {
-            switch (can_msg.identifier) {
-                case CAN_ID_MOTCTRL_STATUS_REQ:
-                    ESP_LOGD(TAG, "Status request received");
-                    send_status_response();
-                    break;
-                    
-                case CAN_ID_MOTCTRL_PKG_START:
-                case CAN_ID_MOTCTRL_PKG_DATA:
-                case CAN_ID_MOTCTRL_PKG_END:
-                    process_package_frame(&can_msg);
-                    break;
-                    
-                default:
-                    ESP_LOGW(TAG, "Unknown CAN ID: 0x%lx", can_msg.identifier);
-                    break;
-            }
-        }
-        
-        // Check for internal events
-        if (xQueueReceive(s_worker_ctx.event_queue, &evt, pdMS_TO_TICKS(10)) == pdTRUE) {
-            switch (evt) {
-                case CAN_WORKER_EVT_RESP_REQUESTED:
-                    send_motorcontroller_response();
-                    break;
-                    
-                case CAN_WORKER_EVT_ERROR:
-                    ESP_LOGE(TAG, "Worker error event");
-                    s_worker_ctx.status_byte = WORKER_STATUS_ERROR;
-                    xEventGroupSetBits(s_worker_ctx.operation_event_group, MOTCTRL_WORKER_ERROR_BIT);
-                    break;
-                    
-                default:
-                    ESP_LOGW(TAG, "Unknown event: %d", evt);
-                    break;
-            }
-        }
-        
-        // Small delay to prevent busy waiting
-        vTaskDelay(pdMS_TO_TICKS(1));
+    if (status_mutex && xSemaphoreTake(status_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        status = current_status;
+        xSemaphoreGive(status_mutex);
     }
     
-    ESP_LOGI(TAG, "CAN worker task exiting");
-    vTaskDelete(NULL);
-}
-
-static esp_err_t send_status_response(void)
-{
-    twai_message_t message = {
-        .identifier = CAN_ID_MOTCTRL_STATUS_RESP,
-        .flags = TWAI_MSG_FLAG_NONE,
-        .data_length_code = 1,
-        .data = {s_worker_ctx.status_byte}
-    };
-    
-    // Use bus manager to send message
-    esp_err_t ret = can_bus_manager_send_message(&message, 100);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to send status response: %s", esp_err_to_name(ret));
-    } else {
-        ESP_LOGD(TAG, "Status response sent: 0x%02X", s_worker_ctx.status_byte);
-    }
-    
-    return ret;
-}
-
-static esp_err_t send_motorcontroller_response(void)
-{
-    if (!s_worker_ctx.resp_ready) {
-        ESP_LOGW(TAG, "No response ready to send");
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    // Serialize response using CAN fragmentation
-    can_fragment_list_t frag_list;
-    esp_err_t ret = can_serialize_resp(&s_worker_ctx.response_to_send, &frag_list);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to serialize response: %s", esp_err_to_name(ret));
-        return ret;
-    }
-    
-    ESP_LOGI(TAG, "Response serialized into %d fragments", frag_list.count);
-    
-    // Send start frame
-    twai_message_t start_msg;
-    ret = can_create_start_frame(frag_list.count, CAN_ID_MOTCTRL_RESP_START, &start_msg);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to create start frame");
-        can_fragment_list_free(&frag_list);
-        return ret;
-    }
-    
-    ret = can_bus_manager_send_message(&start_msg, 1000);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to send start frame: %s", esp_err_to_name(ret));
-        can_fragment_list_free(&frag_list);
-        return ret;
-    }
-    
-    // Send fragment messages using bus manager
-    for (uint16_t i = 0; i < frag_list.count; i++) {
-        ret = can_bus_manager_send_message(&frag_list.fragments[i], 1000);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to send fragment %d: %s", i, esp_err_to_name(ret));
-            can_fragment_list_free(&frag_list);
-            return ret;
-        }
-        vTaskDelay(pdMS_TO_TICKS(1)); // Small delay between fragments
-    }
-    
-    // Send end frame
-    twai_message_t end_msg;
-    ret = can_create_end_frame(CAN_ID_MOTCTRL_RESP_END, &end_msg);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to create end frame");
-        can_fragment_list_free(&frag_list);
-        return ret;
-    }
-    
-    ret = can_bus_manager_send_message(&end_msg, 1000);
-    if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "Response sent successfully (%d fragments)", frag_list.count);
-        xEventGroupSetBits(s_worker_ctx.operation_event_group, MOTCTRL_WORKER_RESP_SENT_BIT);
-    } else {
-        ESP_LOGE(TAG, "Failed to send end frame: %s", esp_err_to_name(ret));
-    }
-    
-    can_fragment_list_free(&frag_list);
-    return ret;
-}
-
-static esp_err_t process_package_frame(const twai_message_t *message)
-{
-    esp_err_t ret = ESP_OK;
-    
-    switch (message->identifier) {
-        case CAN_ID_MOTCTRL_PKG_START:
-            // Reset fragment assembly
-            s_worker_ctx.fragment_pos = 0;
-            s_worker_ctx.expected_fragments = 0;
-            s_worker_ctx.fragments_received = 0;
-            
-            if (message->data_length_code >= 2) {
-                s_worker_ctx.expected_fragments = (message->data[0] << 8) | message->data[1];
-                ESP_LOGI(TAG, "Package start: expecting %d fragments", s_worker_ctx.expected_fragments);
-                
-                // Allocate space for fragment list
-                if (s_worker_ctx.rx_fragment_list.fragments != NULL) {
-                    can_fragment_list_free(&s_worker_ctx.rx_fragment_list);
-                }
-                
-                s_worker_ctx.rx_fragment_list.fragments = malloc(
-                    s_worker_ctx.expected_fragments * sizeof(twai_message_t));
-                if (s_worker_ctx.rx_fragment_list.fragments == NULL) {
-                    ESP_LOGE(TAG, "Failed to allocate fragment list");
-                    return ESP_ERR_NO_MEM;
-                }
-                s_worker_ctx.rx_fragment_list.count = 0;
-            }
-            break;
-            
-        case CAN_ID_MOTCTRL_PKG_DATA:
-            // Store fragment
-            if (s_worker_ctx.rx_fragment_list.fragments != NULL && 
-                s_worker_ctx.fragments_received < s_worker_ctx.expected_fragments) {
-                
-                s_worker_ctx.rx_fragment_list.fragments[s_worker_ctx.fragments_received] = *message;
-                s_worker_ctx.fragments_received++;
-                s_worker_ctx.rx_fragment_list.count = s_worker_ctx.fragments_received;
-                
-                ESP_LOGD(TAG, "Fragment %d/%d received", 
-                        s_worker_ctx.fragments_received, s_worker_ctx.expected_fragments);
-            } else {
-                ESP_LOGE(TAG, "Unexpected fragment or buffer overflow");
-                ret = ESP_FAIL;
-            }
-            break;
-            
-        case CAN_ID_MOTCTRL_PKG_END:
-            // Process complete package
-            if (s_worker_ctx.fragments_received == s_worker_ctx.expected_fragments && 
-                s_worker_ctx.rx_fragment_list.fragments != NULL) {
-                
-                ret = can_deserialize_pkg(&s_worker_ctx.rx_fragment_list, &s_worker_ctx.received_pkg);
-                
-                if (ret == ESP_OK) {
-                    ESP_LOGI(TAG, "Package received and validated successfully");
-                    s_worker_ctx.pkg_ready = true;
-                    s_worker_ctx.state = CAN_WORKER_STATE_PKG_RECEIVED;
-                    s_worker_ctx.status_byte = WORKER_STATUS_WORKING;
-                    xEventGroupSetBits(s_worker_ctx.operation_event_group, MOTCTRL_WORKER_PKG_RECEIVED_BIT);
-                } else {
-                    ESP_LOGE(TAG, "Package deserialization failed: %s", esp_err_to_name(ret));
-                }
-                
-                // Clean up fragment list
-                can_fragment_list_free(&s_worker_ctx.rx_fragment_list);
-            } else {
-                ESP_LOGE(TAG, "Fragment count mismatch: expected %d, got %d", 
-                        s_worker_ctx.expected_fragments, s_worker_ctx.fragments_received);
-                ret = ESP_FAIL;
-            }
-            
-            if (ret != ESP_OK) {
-                s_worker_ctx.status_byte = WORKER_STATUS_ERROR;
-                xEventGroupSetBits(s_worker_ctx.operation_event_group, MOTCTRL_WORKER_ERROR_BIT);
-            }
-            break;
-    }
-    
-    return ret;
+    return status;
 }

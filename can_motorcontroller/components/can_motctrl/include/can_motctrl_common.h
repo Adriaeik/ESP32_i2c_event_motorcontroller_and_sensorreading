@@ -13,9 +13,6 @@ extern "C" {
 // Version information
 #define CAN_MOTCTRL_VERSION_STRING "1.0.0"
 
-// Common configuration constants
-#define MAX_POINTS                  64      // Maximum static measurement points
-#define MAX_FRAGMENT_SIZE           1024    // Maximum fragmented message size
 
 // CAN Message IDs for motor controller communication
 #define CAN_ID_MOTCTRL_PKG_START    0x100   // Package start frame

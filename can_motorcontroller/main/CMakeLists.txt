@@ -2,7 +2,7 @@
 
 set(MAIN_SRCS 
     "main.c"
-    "can_motctrl_test.c"  # Test functions (avoids component circular dependencies)
+     # Test functions (avoids component circular dependencies)
 )
 
 # Base requirements that are always needed
