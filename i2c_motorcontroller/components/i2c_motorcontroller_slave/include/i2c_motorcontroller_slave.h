@@ -33,6 +33,16 @@ typedef enum {
     I2C_SLAVE_STATE_RESP_SENT
 } i2c_slave_state_t;
 
+// Status byte values - must match master header!
+typedef enum {
+    SLAVE_STATUS_IDLE       = 0x00,
+    SLAVE_STATUS_READY      = 0x01,
+    SLAVE_STATUS_WORKING    = 0x02,
+    SLAVE_STATUS_RESP_READY = 0x03,
+    SLAVE_STATUS_ERROR      = 0xFF
+} i2c_slave_status_t;
+
+
 /**
  * @brief I2C slave event data
  */
@@ -82,12 +92,6 @@ typedef struct {
 #define MOTCTRL_SLAVE_RESP_SENT_BIT       (1 << 2)
 #define MOTCTRL_SLAVE_ERROR_BIT           (1 << 3)
 
-// Status byte values
-#define SLAVE_STATUS_IDLE               0x00
-#define SLAVE_STATUS_READY              0x01
-#define SLAVE_STATUS_WORKING            0x02
-#define SLAVE_STATUS_RESP_READY         0x03
-#define SLAVE_STATUS_ERROR              0xFF
 
 /**
  * @brief Install and configure I2C slave driver

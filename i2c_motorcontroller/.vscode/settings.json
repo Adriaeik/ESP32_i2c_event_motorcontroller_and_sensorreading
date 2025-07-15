@@ -27,7 +27,9 @@
     "i2c_master_manager.h": "c",
     "queue.h": "c",
     "i2c_slave.h": "c",
-    "freertos.h": "c"
+    "freertos.h": "c",
+    "compare": "c",
+    "cstdint": "c"
   },
   "idf.flashType": "UART",
   "idf.portWin": "COM15"

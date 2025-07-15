@@ -368,42 +368,49 @@ static void i2c_slave_task(void *pvParameters)
                 case I2C_SLAVE_EVT_RESP_REQUESTED:
                 {
                     ESP_LOGD(TAG, "Master requesting data");
-                    
-                    uint8_t *data_to_send = NULL;
-                    size_t data_len = 0;
-                    
-                    // Determine what to send based on state
-                    if (s_slave_ctx.resp_ready && s_slave_ctx.state == I2C_SLAVE_STATE_RESP_READY) {
-                        // Send full response
-                        data_to_send = s_slave_ctx.tx_buffer;
-                        data_len = s_slave_ctx.tx_len;
-                        ESP_LOGI(TAG, "Sending response data (%d bytes)", data_len);
+
+                    unified_response_wire_t response_wire;
+
+                    // Sett status
+                    response_wire.status = s_slave_ctx.status_byte;
+
+                    // Set response data dersom klart
+                    if (s_slave_ctx.status_byte == SLAVE_STATUS_RESP_READY &&
+                        s_slave_ctx.resp_ready &&
+                        s_slave_ctx.state == I2C_SLAVE_STATE_RESP_READY) {
+                        response_wire.resp = s_slave_ctx.response_to_send;
                     } else {
-                        // Send status byte only
-                        data_to_send = &s_slave_ctx.status_byte;
-                        data_len = 1;
-                        ESP_LOGD(TAG, "Sending status byte: 0x%02X", s_slave_ctx.status_byte);
+                        memset(&response_wire.resp, 0, sizeof(motorcontroller_response_t));
                     }
-                    
-                    // Write data to master
+
+                    // CRC over status + response
+                    response_wire.crc = calculate_unified_crc(&response_wire);
+
+                    // Kopier til tx_buffer for debug/logging
+                    memcpy(s_slave_ctx.tx_buffer, &response_wire, sizeof(response_wire));
+                    s_slave_ctx.tx_len = sizeof(response_wire);
+
+                    // Send til master
                     uint32_t write_len = 0;
-                    esp_err_t ret = i2c_slave_write(s_slave_ctx.dev_handle, 
-                                                    data_to_send, 
-                                                    data_len, 
-                                                    &write_len,
-                                                    1000); 
-                    
+                    esp_err_t ret = i2c_slave_write(
+                        s_slave_ctx.dev_handle,
+                        (uint8_t*)&response_wire,
+                        sizeof(response_wire),
+                        &write_len,
+                        1000
+                    );
+
                     if (ret != ESP_OK) {
                         ESP_LOGE(TAG, "Transmit failed: %s", esp_err_to_name(ret));
                         xEventGroupSetBits(s_slave_ctx.operation_event_group, MOTCTRL_SLAVE_ERROR_BIT);
-                    } else if (s_slave_ctx.resp_ready && s_slave_ctx.state == I2C_SLAVE_STATE_RESP_READY) {
-                        // Response sent successfully
+                    } else if (s_slave_ctx.status_byte == SLAVE_STATUS_RESP_READY) {
                         ESP_LOGI(TAG, "Response sent successfully");
-                        s_slave_ctx.state = I2C_SLAVE_STATE_RESP_SENT;
-                        s_slave_ctx.resp_ready = false;
+                        s_slave_ctx.state = I2C_SLAVE_STATE_IDLE;
                         s_slave_ctx.status_byte = SLAVE_STATUS_IDLE;
+                        s_slave_ctx.resp_ready = false;
                         xEventGroupSetBits(s_slave_ctx.operation_event_group, MOTCTRL_SLAVE_RESP_SENT_BIT);
                     }
+
                     break;
                 }
                 

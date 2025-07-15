@@ -288,94 +288,72 @@ static esp_err_t execute_motor_ctrl_send_pkg(const motorcontroller_pkg_t *pkg, u
     return ESP_OK;
 }
 
-static esp_err_t execute_motor_ctrl_get_resp(motorcontroller_response_t *resp, uint32_t timeout_ms)
-{
-    // Check if motor controller device is available
+static esp_err_t execute_motor_ctrl_get_resp(motorcontroller_response_t *resp, uint32_t timeout_ms) {
     const i2c_mgr_device_config_t *device_config = i2c_master_get_device_config(CONFIG_MOTCTRL_I2C_ADDR);
-    if (device_config == NULL) {
-        ESP_LOGE(TAG, "Motor controller device not found");
-        return ESP_ERR_NOT_FOUND;
-    }
-
-    // Get device handle
+    if (device_config == NULL) return ESP_ERR_NOT_FOUND;
+    
     i2c_master_dev_handle_t device_handle = i2c_master_get_device_handle(CONFIG_MOTCTRL_I2C_ADDR);
-    if (device_handle == NULL) {
-        ESP_LOGE(TAG, "Motor controller device handle not found");
-        return ESP_ERR_NOT_FOUND;
-    }
+    if (device_handle == NULL) return ESP_ERR_NOT_FOUND;
 
     const int poll_interval_ms = 100;
-    const int max_retries = (timeout_ms + poll_interval_ms - 1) / poll_interval_ms;
+    const int max_retries = timeout_ms / poll_interval_ms;
     int retry_count = 0;
-    uint8_t status_byte = 0;
-    esp_err_t err = ESP_OK;
+    unified_response_wire_t unified_resp;
 
     ESP_LOGI(TAG, "Polling for motor controller response...");
 
-    while (retry_count < max_retries) {
-        // Read status byte from slave
-        err = i2c_master_receive(device_handle, &status_byte, 1, poll_interval_ms);
-        ESP_LOG_BUFFER_HEX_LEVEL(TAG, &status_byte, 1, ESP_LOG_INFO);
+    while (retry_count++ < max_retries) {
+        // Attempt to read unified response
+        esp_err_t err = i2c_master_receive(
+            device_handle, 
+            (uint8_t*)&unified_resp, 
+            sizeof(unified_response_wire_t),
+            poll_interval_ms / 2  // Give enough time for response
+        );
+
         if (err != ESP_OK) {
-            ESP_LOGD(TAG, "Status read failed: %s (retry %d/%d)", 
-                esp_err_to_name(err), retry_count+1, max_retries);
-            } else {
-                ESP_LOGD(TAG, "Status byte: 0x%02x", status_byte);
-                
-                // Handle response states
-                if (status_byte == SLAVE_STATUS_RESP_READY) {
-                    uint8_t response_buffer[WIRE_RESP_SIZE];
-                    
-                    // Read full response
-                    // vTaskDelay(pdMS_TO_TICKS(4000));
-                    err = i2c_master_receive(device_handle, response_buffer, sizeof(response_buffer), 1000);
-                    
-                    if (err != ESP_OK) {
-                        ESP_LOGE(TAG, "Response read failed: %s", esp_err_to_name(err));
-                        return err;
-                    }
-
-                    // Deserialize and validate response
-                    uint16_t received_crc;
-                    err = deserialize_resp(response_buffer, sizeof(response_buffer), resp, &received_crc);
-                    if (err != ESP_OK) {
-                        ESP_LOGE(TAG, "Deserialization failed: %s", esp_err_to_name(err));
-                        return err;
-                    }
-                    ESP_LOG_BUFFER_HEX_LEVEL(TAG, response_buffer, sizeof(response_buffer), ESP_LOG_INFO);
-
-                    // Calculate CRC for received response
-                    uint16_t calculated_crc = calculate_resp_crc(resp);
-                    if (received_crc != calculated_crc) {
-                        ESP_LOGE(TAG, "CRC mismatch: received 0x%04X vs calculated 0x%04X", 
-                                received_crc, calculated_crc);
-                        vTaskDelay(pdMS_TO_TICKS(poll_interval_ms));
-                        continue;
-                        return ESP_ERR_INVALID_CRC;
-                    }
-
-                    ESP_LOGI(TAG, "Response received successfully");
-                    return ESP_OK;
-                }
-            else if (status_byte == SLAVE_STATUS_BUSY) {
-                ESP_LOGD(TAG, "Slave busy, waiting...");
-            }
-            else if (status_byte == SLAVE_STATUS_IDLE) {
-                ESP_LOGD(TAG, "Slave idle, waiting for response...");
-            }
-            else {
-                ESP_LOGW(TAG, "Unexpected status: 0x%02x", status_byte);
-            }
+            ESP_LOGD(TAG, "Read failed: %s (retry %d/%d)", 
+                    esp_err_to_name(err), retry_count, max_retries);
+            vTaskDelay(pdMS_TO_TICKS(poll_interval_ms));
+            continue;
         }
 
+
+        // Handle status codes
+        switch (unified_resp.status) {
+            case SLAVE_STATUS_RESP_READY:
+                // Verify CRC (status + response data)
+                uint16_t calculated_crc = calculate_unified_crc(&unified_resp);
+                if (unified_resp.crc != calculated_crc) {
+                    ESP_LOG_BUFFER_HEX_LEVEL(TAG, &unified_resp, sizeof(unified_response_wire_t), ESP_LOG_INFO);
+                    ESP_LOGW(TAG, "CRC mismatch: 0x%04X vs 0x%04X. Retrying...", 
+                            unified_resp.crc, calculated_crc);
+                    break;
+                }
+                // Valid response received
+                *resp = unified_resp.resp;
+                ESP_LOGI(TAG, "Response received successfully");
+                return ESP_OK;
+            case SLAVE_STATUS_WORKING:
+                ESP_LOGW(TAG, "Slave busy, waiting...");
+                break;
+                
+            case SLAVE_STATUS_READY: 
+            case SLAVE_STATUS_IDLE:
+                ESP_LOGW(TAG, "Slave idle, waiting for response...");
+                break;
+                
+            case SLAVE_STATUS_ERROR:
+                ESP_LOGE(TAG, "Slave reported internal error");
+                return ESP_ERR_INVALID_STATE;
+                
+            default:
+                ESP_LOGW(TAG, "Unexpected status: 0x%02X", unified_resp.status);
+        }
+        
         vTaskDelay(pdMS_TO_TICKS(poll_interval_ms));
-        retry_count++;
     }
 
-    if (retry_count >= max_retries) {
-        ESP_LOGE(TAG, "Response polling timeout after %dms", timeout_ms);
-        return ESP_ERR_TIMEOUT;
-    }
-
-    return ESP_OK;
+    ESP_LOGE(TAG, "Timeout after %d retries", max_retries);
+    return ESP_ERR_TIMEOUT;
 }

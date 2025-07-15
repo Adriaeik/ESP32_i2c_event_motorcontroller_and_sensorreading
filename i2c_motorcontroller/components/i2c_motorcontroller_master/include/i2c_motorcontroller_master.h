@@ -17,15 +17,16 @@ extern "C" {
 #define MOTCTRL_MASTER_TIMEOUT_BIT         (1 << 2)
 #define MOTCTRL_MASTER_ERROR_BIT           (1 << 3)
 
-typedef enum {
-    I2C_SLAVE_STATE_IDLE,
-    I2C_SLAVE_STATE_BUSY,
-    I2C_SLAVE_STATE_RESP_READY
-} i2c_slave_state_t;
 
-#define SLAVE_STATUS_IDLE        0x00
-#define SLAVE_STATUS_BUSY        0x01
-#define SLAVE_STATUS_RESP_READY  0x02
+// Status byte values - must match slave header!
+typedef enum {
+    SLAVE_STATUS_IDLE       = 0x00,
+    SLAVE_STATUS_READY      = 0x01,
+    SLAVE_STATUS_WORKING    = 0x02,
+    SLAVE_STATUS_RESP_READY = 0x03,
+    SLAVE_STATUS_ERROR      = 0xFF
+} i2c_slave_status_t;
+
 
 /**
  * @brief Initialize I2C master for motor controller communication

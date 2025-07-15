@@ -10,6 +10,11 @@ uint16_t calculate_resp_crc(const motorcontroller_response_t *resp) {
     return esp_crc16_le(UINT16_MAX, (const uint8_t*)resp, sizeof(motorcontroller_response_t));
 }
 
+uint16_t calculate_unified_crc(const unified_response_wire_t *resp) {
+    // Calculate CRC over status + response data
+    uint16_t crc = esp_crc16_le(UINT16_MAX, &resp->status, 1);
+    return esp_crc16_le(crc, (const uint8_t*)&resp->resp, sizeof(motorcontroller_response_t));
+}
 
 esp_err_t serialize_pkg(const motorcontroller_pkg_t *pkg, uint8_t *buf, size_t *out_len, uint16_t crc) {
     if (!pkg || !buf || !out_len) return ESP_ERR_INVALID_ARG;

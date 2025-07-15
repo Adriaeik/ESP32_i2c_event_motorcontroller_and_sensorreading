@@ -15,14 +15,23 @@ typedef struct {
     motorcontroller_response_t resp;
     uint16_t crc;
 } resp_wire_t;
+
+// Unified response with status header
+typedef struct {
+    uint8_t status;          // Response status byte
+    motorcontroller_response_t resp;
+    uint16_t crc;            // CRC of status + resp
+} unified_response_wire_t;
 #pragma pack(pop)
 
-#define WIRE_PKG_SIZE   sizeof(pkg_wire_t)
-#define WIRE_RESP_SIZE  sizeof(resp_wire_t)
+#define WIRE_PKG_SIZE        sizeof(pkg_wire_t)
+#define WIRE_RESP_SIZE       sizeof(resp_wire_t)
+#define UNIFIED_RESP_SIZE    sizeof(unified_response_wire_t)
 
 // CRC calculation helpers
 uint16_t calculate_pkg_crc(const motorcontroller_pkg_t *pkg);
 uint16_t calculate_resp_crc(const motorcontroller_response_t *resp);
+uint16_t calculate_unified_crc(const unified_response_wire_t *resp);
 
 esp_err_t serialize_pkg(const motorcontroller_pkg_t *pkg, uint8_t *buf, size_t *out_len, uint16_t crc);
 esp_err_t deserialize_pkg(const uint8_t *buf, size_t len, motorcontroller_pkg_t *pkg, uint16_t *crc);
