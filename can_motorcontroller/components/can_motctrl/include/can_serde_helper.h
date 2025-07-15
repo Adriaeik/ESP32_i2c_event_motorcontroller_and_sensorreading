@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include "buoye_structs.h"
 #include "can_motctrl_common.h"
+#include "can_bus_manager.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -18,7 +19,7 @@ extern "C" {
 
 // Fragment list structure for CAN messages
 typedef struct {
-    twai_message_t *fragments;  // Array of CAN message fragments
+    can_message_t  *fragments;  // Array of CAN message fragments
     uint16_t count;            // Number of fragments
 } can_fragment_list_t;
 

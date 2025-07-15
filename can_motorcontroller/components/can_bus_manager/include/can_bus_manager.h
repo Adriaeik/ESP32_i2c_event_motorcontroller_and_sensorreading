@@ -28,16 +28,17 @@ typedef enum {
 #ifdef __cplusplus
 extern "C" {
 #endif
-typedef union {
-    twai_message_t twai;
-    struct {
-        uint32_t identifier;
-        uint8_t data_length_code;
-        uint8_t flags;
-        uint8_t reserved;
-        uint8_t data[8];
-    };
-} can_message_t;
+// typedef union {
+//     twai_message_t twai;
+//     struct {
+//         uint32_t identifier;
+//         uint8_t data_length_code;
+//         uint8_t flags;
+//         uint8_t reserved;
+//         uint8_t data[8];
+//     };
+// } can_message_t;
+typedef twai_message_t can_message_t;
 
 enum {
     CAN_MSG_FLAG_NONE = TWAI_MSG_FLAG_NONE,

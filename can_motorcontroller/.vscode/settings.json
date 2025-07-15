@@ -34,8 +34,9 @@
     "can_motctrl_config.h": "c",
     "stdbool.h": "c",
     "can_motctrl_worker.h": "c",
-    "esp_err.h": "c"
+    "esp_err.h": "c",
+    "string.h": "c"
   },
   "idf.flashType": "UART",
-  "idf.portWin": "COM4"
+  "idf.portWin": "COM15"
 }

@@ -69,7 +69,7 @@ esp_err_t can_serialize_pkg(const motorcontroller_pkg_t *pkg, can_fragment_list_
         data_pos += copy_len;
 
         // Create CAN message
-        frag_list->fragments[i] = (twai_message_t){
+        frag_list->fragments[i] = (can_message_t){
             .identifier = CAN_ID_MOTCTRL_PKG_DATA,
             .flags = TWAI_MSG_FLAG_NONE,
             .data_length_code = sizeof(can_fragment_t),

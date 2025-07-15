@@ -138,16 +138,9 @@ esp_err_t can_bus_send_message(const can_message_t *message, can_priority_t prio
         return ESP_ERR_TIMEOUT;
     }
 
-    // Convert to TWAI message
-    twai_message_t twai_msg = {
-        .identifier = message->identifier,
-        .data_length_code = message->data_length_code,
-        .flags = message->flags,
-    };
-    memcpy(twai_msg.data, message->data, 8);
 
     // Priority currently not used in TWAI, but kept for interface compatibility
-    esp_err_t ret = twai_transmit(&twai_msg, pdMS_TO_TICKS(timeout_ms));
+    esp_err_t ret = twai_transmit(message, pdMS_TO_TICKS(timeout_ms));
     
     // Update statistics
     if (xSemaphoreTake(stats_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
@@ -169,16 +162,10 @@ esp_err_t can_bus_receive_message(can_message_t *message, uint32_t timeout_ms)
         return ESP_ERR_INVALID_ARG;
     }
 
-    twai_message_t twai_msg;
-    esp_err_t ret = twai_receive(&twai_msg, pdMS_TO_TICKS(timeout_ms));
+    esp_err_t ret = twai_receive(message, pdMS_TO_TICKS(timeout_ms));
     
     if (ret == ESP_OK) {
-        // Convert to our abstracted type
-        message->identifier = twai_msg.identifier;
-        message->data_length_code = twai_msg.data_length_code;
-        message->flags = twai_msg.flags;
-        memcpy(message->data, twai_msg.data, 8);
-        
+
         // Update statistics
         if (xSemaphoreTake(stats_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
             stats.messages_received++;
