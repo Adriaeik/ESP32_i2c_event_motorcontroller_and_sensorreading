@@ -3,6 +3,7 @@
 #include "esp_log.h"
 #include "driver/gpio.h"
 #include "sdkconfig.h"
+#include "serde_helper.h"
 
 static const char *TAG = "i2c_motctrl_master";
 
@@ -252,6 +253,13 @@ static esp_err_t execute_motor_ctrl_send_pkg(const motorcontroller_pkg_t *pkg, u
         return ESP_ERR_NOT_FOUND;
     }
     
+    // Get device handle
+    i2c_master_dev_handle_t device_handle = i2c_master_get_device_handle(CONFIG_MOTCTRL_I2C_ADDR);
+    if (device_handle == NULL) {
+        ESP_LOGE(TAG, "Motor controller device handle not found");
+        return ESP_ERR_NOT_FOUND;
+    }
+    
     // Serialize motor controller package
     uint8_t tx_buffer[WIRE_PKG_SIZE + 10]; // Extra space for safety
     size_t tx_len;
@@ -266,22 +274,17 @@ static esp_err_t execute_motor_ctrl_send_pkg(const motorcontroller_pkg_t *pkg, u
     
     ESP_LOG_BUFFER_HEX_LEVEL(TAG, tx_buffer, tx_len, ESP_LOG_INFO);
     
-    // Queue the operation with manager
-    i2c_operation_t operation = {
-        .op_type = I2C_OP_TYPE_CUSTOM,
-        .device_addr = CONFIG_MOTCTRL_I2C_ADDR,
-        .data = tx_buffer,
-        .data_len = tx_len,
-        .timeout_ms = timeout_ms
-    };
-    
-    ret = i2c_master_queue_operation(&operation);
+    // Send package directly using device handle
+    ret = i2c_master_transmit(device_handle, tx_buffer, tx_len, timeout_ms);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to queue motor controller package transmission");
+        ESP_LOGE(TAG, "Failed to transmit motor controller package: %s", esp_err_to_name(ret));
         return ret;
     }
     
-    ESP_LOGI(TAG, "Motor controller package queued successfully");
+    // Signal completion
+    xEventGroupSetBits(s_motctrl_event_group, MOTCTRL_MASTER_PKG_SENT_BIT);
+    
+    ESP_LOGI(TAG, "Motor controller package sent successfully");
     return ESP_OK;
 }
 
@@ -294,65 +297,66 @@ static esp_err_t execute_motor_ctrl_get_resp(motorcontroller_response_t *resp, u
         return ESP_ERR_NOT_FOUND;
     }
 
+    // Get device handle
+    i2c_master_dev_handle_t device_handle = i2c_master_get_device_handle(CONFIG_MOTCTRL_I2C_ADDR);
+    if (device_handle == NULL) {
+        ESP_LOGE(TAG, "Motor controller device handle not found");
+        return ESP_ERR_NOT_FOUND;
+    }
+
     const int poll_interval_ms = 100;
     const int max_retries = (timeout_ms + poll_interval_ms - 1) / poll_interval_ms;
     int retry_count = 0;
     uint8_t status_byte = 0;
+    esp_err_t err = ESP_OK;
 
     ESP_LOGI(TAG, "Polling for motor controller response...");
 
     while (retry_count < max_retries) {
         // Read status byte from slave
-        esp_err_t err = ESP_OK;
-        // err = i2c_master_read_device(
-        //     CONFIG_MOTCTRL_I2C_ADDR,
-        //     &status_byte,
-        //     sizeof(status_byte),
-        //     poll_interval_ms
-        // );
-
+        err = i2c_master_receive(device_handle, &status_byte, 1, poll_interval_ms);
+        ESP_LOG_BUFFER_HEX_LEVEL(TAG, &status_byte, 1, ESP_LOG_INFO);
         if (err != ESP_OK) {
             ESP_LOGD(TAG, "Status read failed: %s (retry %d/%d)", 
-                    esp_err_to_name(err), retry_count+1, max_retries);
-        } else {
-            ESP_LOGD(TAG, "Status byte: 0x%02x", status_byte);
-
-            // Handle response states
-            if (status_byte == SLAVE_STATUS_RESP_READY) {
-                uint8_t response_buffer[WIRE_RESP_SIZE];
+                esp_err_to_name(err), retry_count+1, max_retries);
+            } else {
+                ESP_LOGD(TAG, "Status byte: 0x%02x", status_byte);
                 
-                // Read full response
-                err = i2c_master_read_device(
-                    CONFIG_MOTCTRL_I2C_ADDR,
-                    response_buffer,
-                    sizeof(response_buffer),
-                    1000
-                );
-                
-                if (err != ESP_OK) {
-                    ESP_LOGE(TAG, "Response read failed: %s", esp_err_to_name(err));
-                    return err;
-                }
+                // Handle response states
+                if (status_byte == SLAVE_STATUS_RESP_READY) {
+                    uint8_t response_buffer[WIRE_RESP_SIZE];
+                    
+                    // Read full response
+                    // vTaskDelay(pdMS_TO_TICKS(4000));
+                    err = i2c_master_receive(device_handle, response_buffer, sizeof(response_buffer), 1000);
+                    
+                    if (err != ESP_OK) {
+                        ESP_LOGE(TAG, "Response read failed: %s", esp_err_to_name(err));
+                        return err;
+                    }
 
-                // Deserialize and validate response
-                uint16_t received_crc;
-                err = deserialize_resp(response_buffer, sizeof(response_buffer), resp, &received_crc);
-                if (err != ESP_OK) {
-                    ESP_LOGE(TAG, "Deserialization failed: %s", esp_err_to_name(err));
-                    return err;
-                }
+                    // Deserialize and validate response
+                    uint16_t received_crc;
+                    err = deserialize_resp(response_buffer, sizeof(response_buffer), resp, &received_crc);
+                    if (err != ESP_OK) {
+                        ESP_LOGE(TAG, "Deserialization failed: %s", esp_err_to_name(err));
+                        return err;
+                    }
+                    ESP_LOG_BUFFER_HEX_LEVEL(TAG, response_buffer, sizeof(response_buffer), ESP_LOG_INFO);
 
-                // Calculate CRC for received response
-                uint16_t calculated_crc = calculate_resp_crc(resp);
-                if (received_crc != calculated_crc) {
-                    ESP_LOGE(TAG, "CRC mismatch: received 0x%04X vs calculated 0x%04X", 
-                            received_crc, calculated_crc);
-                    return ESP_ERR_INVALID_CRC;
-                }
+                    // Calculate CRC for received response
+                    uint16_t calculated_crc = calculate_resp_crc(resp);
+                    if (received_crc != calculated_crc) {
+                        ESP_LOGE(TAG, "CRC mismatch: received 0x%04X vs calculated 0x%04X", 
+                                received_crc, calculated_crc);
+                        vTaskDelay(pdMS_TO_TICKS(poll_interval_ms));
+                        continue;
+                        return ESP_ERR_INVALID_CRC;
+                    }
 
-                ESP_LOGI(TAG, "Response received successfully");
-                return ESP_OK;
-            }
+                    ESP_LOGI(TAG, "Response received successfully");
+                    return ESP_OK;
+                }
             else if (status_byte == SLAVE_STATUS_BUSY) {
                 ESP_LOGD(TAG, "Slave busy, waiting...");
             }
@@ -362,11 +366,6 @@ static esp_err_t execute_motor_ctrl_get_resp(motorcontroller_response_t *resp, u
             else {
                 ESP_LOGW(TAG, "Unexpected status: 0x%02x", status_byte);
             }
-        }
-
-        // Handle early completion cases
-        if (err == ESP_OK && status_byte == SLAVE_STATUS_RESP_READY) {
-            break;
         }
 
         vTaskDelay(pdMS_TO_TICKS(poll_interval_ms));

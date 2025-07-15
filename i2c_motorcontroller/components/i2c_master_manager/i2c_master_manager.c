@@ -38,15 +38,16 @@ esp_err_t i2c_master_manager_init(i2c_mgr_callback_t callback, void *user_data)
         return ESP_ERR_NO_MEM;
     }
 
-    // Initialize I2C master bus - FIXED configuration
+    // Initialize I2C master bus
     i2c_master_bus_config_t i2c_mst_config = {
         .clk_source = I2C_CLK_SRC_DEFAULT,
         .i2c_port = CONFIG_I2C_MASTER_I2C_NUM,
         .scl_io_num = CONFIG_I2C_MASTER_SCL_GPIO,
         .sda_io_num = CONFIG_I2C_MASTER_SDA_GPIO,
         .glitch_ignore_cnt = 7,
-        .flags.enable_internal_pullup = false,  // FIXED: Use external pull-ups
-        .trans_queue_depth = 10,
+        .flags.enable_internal_pullup = false,  // Use external pull-ups
+        .trans_queue_depth = 0,  // Synchronous mode
+        .intr_priority = 0,
     };
 
     esp_err_t ret = i2c_new_master_bus(&i2c_mst_config, &s_master_ctx.bus_handle);
@@ -234,10 +235,10 @@ static esp_err_t i2c_master_auto_configure_devices(void)
 {
     esp_err_t ret = ESP_OK;
 
-    // Add motor controller device (CRITICAL FIX)
+    // Add motor controller device
     i2c_mgr_device_config_t motctrl_config = {
         .name = "Motor Controller",
-        .address = CONFIG_MOTCTRL_I2C_ADDR,  // Should match slave address
+        .address = CONFIG_MOTCTRL_I2C_ADDR,
         .type = I2C_DEVICE_TYPE_MOTOR_CONTROLLER,
         .speed_hz = CONFIG_I2C_MASTER_CLK_SPEED,
         .enabled = true
@@ -310,6 +311,8 @@ static esp_err_t i2c_master_create_device_handle(const i2c_mgr_device_config_t *
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = config->address,
         .scl_speed_hz = config->speed_hz,
+        .scl_wait_us = 0,
+        .flags.disable_ack_check = false,
     };
     
     ESP_LOGD(TAG, "Creating device handle for %s", config->name);
@@ -402,7 +405,7 @@ static esp_err_t i2c_master_execute_operation(i2c_operation_t *operation)
                 device_handle,
                 &operation->sensor.reg_addr, 1,
                 operation->sensor.read_buffer, operation->sensor.read_len,
-                pdMS_TO_TICKS(operation->timeout_ms)
+                operation->timeout_ms
             );
             
             if (ret != ESP_OK) {
@@ -423,7 +426,7 @@ static esp_err_t i2c_master_execute_operation(i2c_operation_t *operation)
             memcpy(&write_buffer[1], operation->data, operation->data_len);
             
             ret = i2c_master_transmit(device_handle, write_buffer, operation->data_len + 1, 
-                                     pdMS_TO_TICKS(operation->timeout_ms));
+                                     operation->timeout_ms);
             
             if (ret != ESP_OK) {
                 ESP_LOGE(TAG, "Failed to write to sensor register 0x%02X: %s", 
@@ -441,12 +444,11 @@ static esp_err_t i2c_master_execute_operation(i2c_operation_t *operation)
             if (operation->data && operation->data_len > 0) {
                 ESP_LOGD(TAG, "Transmitting %d bytes to device 0x%02X", operation->data_len, operation->device_addr);
                 ret = i2c_master_transmit(device_handle, operation->data, operation->data_len, 
-                                         pdMS_TO_TICKS(operation->timeout_ms));
+                                         operation->timeout_ms);
             } else {
-                // FIXED: For device probing with no data, just try to address the device
+                // For device probing with no data, use probe function
                 ESP_LOGD(TAG, "Probing device 0x%02X", operation->device_addr);
-                uint8_t dummy = 0;
-                ret = i2c_master_transmit(device_handle, &dummy, 0, pdMS_TO_TICKS(operation->timeout_ms));
+                ret = i2c_master_probe(s_master_ctx.bus_handle, operation->device_addr, operation->timeout_ms);
             }
             break;
         }
@@ -501,27 +503,9 @@ esp_err_t i2c_master_sensor_write_reg(uint8_t device_addr, uint8_t reg_addr, con
 
 bool i2c_master_device_is_available(uint8_t device_addr)
 {
-    // Find device handle
-    i2c_master_dev_handle_t device_handle = NULL;
-    for (int i = 0; i < s_master_ctx.num_devices; i++) {
-        if (s_master_ctx.device_configs[i].address == device_addr) {
-            device_handle = s_master_ctx.device_handles[i];
-            break;
-        }
-    }
-    
-    if (device_handle == NULL) {
-        return false;
-    }
-    
-    // FIXED: Try to probe the device with proper buffer
-    uint8_t dummy = 0;
-    for (int i = 0; i < 3; i++) {
-        if (i2c_master_transmit(device_handle, &dummy, 1,  pdMS_TO_TICKS(100)) == ESP_OK) 
-            return true;
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-    return false;
+    // Use the probe function to check if device is available
+    esp_err_t ret = i2c_master_probe(s_master_ctx.bus_handle, device_addr, 100);
+    return (ret == ESP_OK);
 }
 
 const i2c_mgr_device_config_t* i2c_master_get_device_config(uint8_t device_addr)
@@ -534,44 +518,25 @@ const i2c_mgr_device_config_t* i2c_master_get_device_config(uint8_t device_addr)
     return NULL;
 }
 
-void i2c_scan_physical_bus() {
+void i2c_scan_physical_bus(void) 
+{
     ESP_LOGI(TAG, "Scanning physical I2C bus...");
     
     bool found_any = false;
     for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
-        // FIXED: Create temporary device handle for each address during scan
-        i2c_device_config_t temp_dev_cfg = {
-            .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-            .device_address = addr,
-            .scl_speed_hz = CONFIG_I2C_MASTER_CLK_SPEED,  // Use configured speed
-        };
-        
-        i2c_master_dev_handle_t temp_handle = NULL;
-        esp_err_t ret = i2c_master_bus_add_device(s_master_ctx.bus_handle, &temp_dev_cfg, &temp_handle);
+        esp_err_t ret = i2c_master_probe(s_master_ctx.bus_handle, addr, 50);
         
         if (ret == ESP_OK) {
-            // FIXED: Use a dummy byte for probing instead of NULL/0
-            uint8_t dummy_data = 0x00;
-            esp_err_t probe_ret = i2c_master_transmit(temp_handle, &dummy_data, 0, pdMS_TO_TICKS(50));
+            ESP_LOGI(TAG, "Found device at address 0x%02X", addr);
+            found_any = true;
             
-            if (probe_ret == ESP_OK) {
-                ESP_LOGI(TAG, "Found device at address 0x%02X", addr);
-                found_any = true;
-                
-                // Check if this is a configured device
-                const i2c_mgr_device_config_t *config = i2c_master_get_device_config(addr);
-                if (config) {
-                    ESP_LOGI(TAG, "  -> Configured as: %s", config->name);
-                } else {
-                    ESP_LOGI(TAG, "  -> Unconfigured device");
-                }
+            // Check if this is a configured device
+            const i2c_mgr_device_config_t *config = i2c_master_get_device_config(addr);
+            if (config) {
+                ESP_LOGI(TAG, "  -> Configured as: %s", config->name);
             } else {
-                // Only log at debug level for failed probes to reduce noise
-                ESP_LOGD(TAG, "No response from 0x%02X: %s", addr, esp_err_to_name(probe_ret));
+                ESP_LOGI(TAG, "  -> Unconfigured device");
             }
-            
-            // Clean up temporary handle
-            i2c_master_bus_rm_device(temp_handle);
         }
     }
     
@@ -581,7 +546,7 @@ void i2c_scan_physical_bus() {
 }
 
 // Helper function for direct device handle access
-static i2c_master_dev_handle_t get_device_handle(uint8_t device_addr)
+i2c_master_dev_handle_t i2c_master_get_device_handle(uint8_t device_addr)
 {
     for (int i = 0; i < s_master_ctx.num_devices; i++) {
         if (s_master_ctx.device_configs[i].address == device_addr) {
@@ -591,10 +556,10 @@ static i2c_master_dev_handle_t get_device_handle(uint8_t device_addr)
     return NULL;
 }
 
-// Custom read function using your I2C manager's device handles
+// Custom read function using device handles
 esp_err_t i2c_master_read_device(uint8_t device_addr, uint8_t *data, size_t len, uint32_t timeout_ms)
 {
-    i2c_master_dev_handle_t device_handle = get_device_handle(device_addr);
+    i2c_master_dev_handle_t device_handle = i2c_master_get_device_handle(device_addr);
     if (device_handle == NULL) {
         return ESP_ERR_NOT_FOUND;
     }

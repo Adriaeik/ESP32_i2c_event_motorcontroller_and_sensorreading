@@ -22,7 +22,7 @@ typedef enum {
 } i2c_device_type_t;
 
 /**
- * @brief I2C device configuration (renamed to avoid conflicts)
+ * @brief I2C device configuration
  */
 typedef struct {
     char name[32];                    // Device name/identifier
@@ -43,7 +43,7 @@ typedef struct {
             void *custom_config;     // Pointer to custom config
         } custom;
     };
-} i2c_mgr_device_config_t;  // Renamed to avoid conflicts
+} i2c_mgr_device_config_t;
 
 /**
  * @brief I2C operation types
@@ -84,7 +84,7 @@ typedef struct {
 } i2c_operation_t;
 
 /**
- * @brief I2C master event types (renamed to avoid conflicts)
+ * @brief I2C master event types
  */
 typedef enum {
     I2C_MGR_EVT_OPERATION_COMPLETE,
@@ -94,7 +94,7 @@ typedef enum {
 } i2c_mgr_event_type_t;
 
 /**
- * @brief I2C master event data (renamed to avoid conflicts)
+ * @brief I2C master event data
  */
 typedef struct {
     i2c_mgr_event_type_t event_type;
@@ -106,12 +106,12 @@ typedef struct {
 } i2c_mgr_event_data_t;
 
 /**
- * @brief I2C master callback function type (renamed to avoid conflicts)
+ * @brief I2C master callback function type
  */
 typedef void (*i2c_mgr_callback_t)(const i2c_mgr_event_data_t *event_data, void *user_data);
 
 /**
- * @brief I2C master context (renamed to avoid conflicts)
+ * @brief I2C master context
  */
 typedef struct {
     i2c_master_bus_handle_t bus_handle;
@@ -217,9 +217,29 @@ bool i2c_master_device_is_available(uint8_t device_addr);
  */
 const i2c_mgr_device_config_t* i2c_master_get_device_config(uint8_t device_addr);
 
-void i2c_scan_physical_bus();
+/**
+ * @brief Scan the physical I2C bus for devices
+ */
+void i2c_scan_physical_bus(void);
 
+/**
+ * @brief Read data from I2C device
+ * 
+ * @param device_addr Device address
+ * @param data Buffer for read data
+ * @param len Number of bytes to read
+ * @param timeout_ms Timeout in milliseconds
+ * @return ESP_OK on success, error code otherwise
+ */
 esp_err_t i2c_master_read_device(uint8_t device_addr, uint8_t *data, size_t len, uint32_t timeout_ms);
+
+/**
+ * @brief Get device handle by address
+ * 
+ * @param device_addr Device address
+ * @return Device handle or NULL if not found
+ */
+i2c_master_dev_handle_t i2c_master_get_device_handle(uint8_t device_addr);
 
 #ifdef __cplusplus
 }
