@@ -7,7 +7,7 @@
 #include "freertos/task.h"
 
 // Uncomment for manager, comment for worker
-#define ROLE_MANAGER
+// #define ROLE_MANAGER
 // #define STRESS_TEST_ENABLED  // Comment to disable stress test
 
 static const char *TAG = "MAIN";

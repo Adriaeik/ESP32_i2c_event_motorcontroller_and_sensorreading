@@ -57,41 +57,48 @@ int calculate_operation_timeout(state_t state,
                                uint16_t samples,
                                uint16_t static_poll_interval_s)
 {
-    int base_timeout = CAN_ACK_TIMEOUT_MS;
-    
-    // Calculate movement time based on speed estimate
-    if (prev_estimated_cm_per_s > 0) {
-        // Estimate distance (assuming starting from 0 or surface)
-        int distance = end_depth;
-        base_timeout = (distance * 100) / prev_estimated_cm_per_s;  // Convert to seconds
+    // Input validation
+    if (prev_estimated_cm_per_s == 0) {
+        prev_estimated_cm_per_s = 50; // Default 50 cm/s
     }
+    if (end_depth == 0) {
+        return CAN_MOTCTRL_MIN_TIMEOUT; // No movement needed
+    }
+    
+    // Calculate movement time: distance(cm) / speed(cm/s) = time(s)
+    int movement_time = end_depth / prev_estimated_cm_per_s;
     
     // Add time for static measurements
     int static_time = 0;
     if (static_points != NULL) {
+        int point_count = 0;
         for (int i = 0; i < MAX_POINTS && static_points[i] > 0; i++) {
-            static_time += samples * static_poll_interval_s;
+            point_count++;
         }
+        static_time = point_count * samples * static_poll_interval_s;
     }
     
+    // Base timeout = movement + static measurements
+    int base_timeout = movement_time + static_time;
+    
     // Apply rising timeout percentage for rising operations
-    if (state == RISING) {
+    if (state == RISING && rising_timeout_percent > 0) {
         base_timeout = (base_timeout * (100 + rising_timeout_percent)) / 100;
     }
     
-    // Add static measurement time
-    base_timeout += static_time;
+    // Add safety margin (50% for robustness)
+    base_timeout = (base_timeout * 150) / 100;
     
-    // Add safety margin (20%)
-    base_timeout = (base_timeout * 120) / 100;
-    
-    // Enforce limits
+    // Enforce reasonable limits
     if (base_timeout < CAN_MOTCTRL_MIN_TIMEOUT) {
         base_timeout = CAN_MOTCTRL_MIN_TIMEOUT;
     }
     if (base_timeout > CAN_MOTCTRL_MAX_TIMEOUT) {
         base_timeout = CAN_MOTCTRL_MAX_TIMEOUT;
     }
+    
+    ESP_LOGD("timeout_calc", "Calculated timeout: %ds (movement:%ds, static:%ds, state:%s)", 
+             base_timeout, movement_time, static_time, get_state_string(state));
     
     return base_timeout;
 }

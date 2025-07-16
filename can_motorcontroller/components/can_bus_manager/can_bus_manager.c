@@ -52,24 +52,25 @@ static void can_receive_task(void *arg) {
         
         // Find matching subscriptions
         bool delivered = false;
+        bool queue_full = false;
         for (int i = 0; i < subscription_count; i++) {
             if (subscriptions[i].can_id == msg.identifier) {
-                // Copy message to queue
                 can_message_t *msg_copy = malloc(sizeof(can_message_t));
                 if (msg_copy) {
                     *msg_copy = msg;
                     if (xQueueSend(subscriptions[i].queue, &msg_copy, 0) != pdPASS) {
                         ESP_LOGW(TAG, "Queue full for ID 0x%X", msg.identifier);
                         free(msg_copy);
+                        queue_full = true;
                     } else {
                         delivered = true;
                     }
                 }
             }
         }
-        
-        // Warn if no subscribers
-        if (!delivered) {
+
+        // Only warn about no subscribers if there really are none
+        if (!delivered && !queue_full) {
             ESP_LOGW(TAG, "No subscribers for ID 0x%X", msg.identifier);
         }
         

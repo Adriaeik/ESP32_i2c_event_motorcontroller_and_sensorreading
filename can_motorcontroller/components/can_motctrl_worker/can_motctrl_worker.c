@@ -49,28 +49,29 @@ esp_err_t send_work_response(const motorcontroller_response_t *resp, uint32_t ti
 
 
 
-
 void worker_task(void *arg) {
     ESP_LOGI(TAG, "Worker task started");
     
-    // Subscribe once at startup
-    esp_err_t ret ;
-    if (can_subscribe_set(CAN_MTOTCTRL_WORKER) != ESP_OK) {
-        ESP_LOGE(TAG, "Worker failed to subscribe to package channels, cannot function");
-        return;
-    }
-    
-    ESP_LOGI(TAG, "Worker subscribed to package channels, ready to receive work");
-    
     while (1) {
+        // Subscribe only when ready to receive work
+        esp_err_t ret = can_subscribe_set(CAN_MTOTCTRL_WORKER);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to subscribe to package channels");
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            continue;
+        }
+        
+        ESP_LOGI(TAG, "Worker ready to receive work");
+        
         // Wait for work package
         motorcontroller_pkg_t pkg;
         ret = receive_work_package(&pkg, portMAX_DELAY);
         
         if (ret == ESP_OK) {
+            
             print_motorcontroller_pkg_info(&pkg, "Worker");
             
-            // Simulate work
+            // Calculate and perform work
             int work_time = calculate_operation_timeout(
                 pkg.STATE, pkg.prev_estimated_cm_per_s, pkg.rising_timeout_percent,
                 pkg.end_depth, pkg.static_points, pkg.samples, pkg.static_poll_interval_s
@@ -82,17 +83,45 @@ void worker_task(void *arg) {
             // Create and send response
             motorcontroller_response_t resp;
             motorcontroller_response_init_default(&resp);
+            resp.STATE = pkg.STATE;
             resp.result = ESP_OK;
             resp.working_time = work_time;
+            resp.estimated_cm_per_s = pkg.prev_estimated_cm_per_s; // or calculate new estimate
             
             print_motorcontroller_response_info(&resp, "Worker");
-            ret = send_work_response(&resp, 5000);  // 5 second timeout
+            ret = send_work_response(&resp, 5000);
             if (ret != ESP_OK) {
                 ESP_LOGE(TAG, "Failed to send response: %s", esp_err_to_name(ret));
             }
         } else {
             ESP_LOGE(TAG, "Failed to receive package: %s", esp_err_to_name(ret));
-            vTaskDelay(pdMS_TO_TICKS(1000));  // Brief pause before retry
+            vTaskDelay(pdMS_TO_TICKS(1000));
         }
+        can_unsubscribe_set(CAN_MTOTCTRL_WORKER); 
     }
 }
+
+// // motorcontroller work
+// // wake up
+// ESP_ERROR_CHECK(can_bus_manager_init());
+// can_subscribe_set(CAN_MTOTCTRL_WORKER);
+// motorcontroller_pkg_t pkg;
+// receive_work_package(&pkg, portMAX_DELAY);
+// motorcontroller_response_t resp;//start_work will fill this in ready to send
+// start_work(&pkg, &resp);
+// send_work_response(&resp, timeout);
+// can_unsubscribe_set(CAN_MTOTCTRL_WORKER); 
+// can_bus_manager_deinit();
+// deepsleep();
+
+// // motorcontroller manager
+// ESP_ERROR_CHECK(can_bus_manager_init());
+// motorcontroller_pkg_t pkg;
+// set_system_motorcontroller_pkg(&pkg, STATE); // reads from file or something, updates based on time
+// start_worker(&pkg, timeout); // handels subscription and fault
+// motorcontroller_response_t resp;
+// uint32_t estimated_time = calculate_operation_timet(&pkg)
+// wait_for_worker(&resp, estimated_time, estimated_time + 10000); // handles usubscribe too
+// can_bus_manager_deinit();
+// update_and_store_pkg(&pkg, &resp);
+// // exit and wait for new sycle 

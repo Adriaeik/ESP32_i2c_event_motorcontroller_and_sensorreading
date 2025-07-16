@@ -1,5 +1,5 @@
 #include "can_serde_helper.h"
-#include "serde_helper.h"  // Your existing serialization functions
+#include "serde_helper.h"  // crc and serde functions
 #include "esp_log.h"
 #include <string.h>
 
