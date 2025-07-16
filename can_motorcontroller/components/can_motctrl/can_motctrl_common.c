@@ -57,7 +57,7 @@ int calculate_operation_timeout(state_t state,
                                uint16_t samples,
                                uint16_t static_poll_interval_s)
 {
-    int base_timeout = CAN_MOTCTRL_DEFAULT_TIMEOUT;
+    int base_timeout = CAN_ACK_TIMEOUT_MS;
     
     // Calculate movement time based on speed estimate
     if (prev_estimated_cm_per_s > 0) {
