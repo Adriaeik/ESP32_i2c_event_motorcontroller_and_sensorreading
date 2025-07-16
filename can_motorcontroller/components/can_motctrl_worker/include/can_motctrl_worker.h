@@ -10,7 +10,7 @@ extern "C" {
 
 esp_err_t receive_work_package(motorcontroller_pkg_t *pkg, uint32_t timeout_ms);
 
-esp_err_t send_work_response(const motorcontroller_response_t *resp, uint32_t timeout_ms, uint8_t retries);
+esp_err_t send_work_response(const motorcontroller_response_t *resp, uint32_t timeout_ms);
 
 void worker_task(void *arg);
 

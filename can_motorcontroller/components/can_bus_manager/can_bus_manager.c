@@ -6,6 +6,10 @@
 #include "esp_err.h"
 #include <string.h>
 
+typedef struct {
+    uint32_t can_id;
+    QueueHandle_t queue;
+} can_subscription_t;
 
 static const char *TAG = "can_bus_manager";
 
@@ -274,7 +278,34 @@ esp_err_t can_bus_subscribe_id(uint32_t can_id, uint8_t queue_size) {
     return ESP_OK;
 }
 
-esp_err_t can_bus_unsubscribe_id(uint32_t can_id) {
+esp_err_t can_subscribe_multiple(const can_subscription_spec_t *specs, size_t count) {
+    if (!specs || count == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    esp_err_t ret;
+    size_t subscribed = 0;
+    
+    for (size_t i = 0; i < count; i++) {
+        ret = can_bus_subscribe_id(specs[i].can_id, specs[i].queue_size);
+        if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+            ESP_LOGE("CAN_MULTI_SUB", "Failed to subscribe to ID 0x%X: %s", 
+                     specs[i].can_id, esp_err_to_name(ret));
+            // Cleanup already subscribed IDs
+            for (size_t j = 0; j < subscribed; j++) {
+                can_bus_unsubscribe_id(specs[j].can_id);
+            }
+            return ret;
+        }
+        subscribed++;
+    }
+    
+    ESP_LOGI("CAN_MULTI_SUB", "Successfully subscribed to %d CAN IDs", count);
+    return ESP_OK;
+}
+
+esp_err_t can_bus_unsubscribe_id(uint32_t can_id)
+{
     if (!initialized) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -314,6 +345,23 @@ esp_err_t can_bus_unsubscribe_id(uint32_t can_id) {
     xSemaphoreGive(sub_mutex);
     ESP_LOGW(TAG, "Not subscribed to ID 0x%X", can_id);
     return ESP_ERR_NOT_FOUND;
+}
+
+esp_err_t can_unsubscribe_multiple(const uint32_t *can_ids, size_t count) {
+    if (!can_ids || count == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    
+    for (size_t i = 0; i < count; i++) {
+        esp_err_t ret = can_bus_unsubscribe_id(can_ids[i]);
+        if (ret != ESP_OK && ret != ESP_ERR_NOT_FOUND) {
+            ESP_LOGW("CAN_MULTI_UNSUB", "Failed to unsubscribe from ID 0x%X: %s", 
+                     can_ids[i], esp_err_to_name(ret));
+        }
+    }
+    
+    ESP_LOGI("CAN_MULTI_UNSUB", "Unsubscribed from %d CAN IDs", count);
+    return ESP_OK;
 }
 
 esp_err_t can_bus_wait_for_message(uint32_t can_id, can_message_t *msg, uint32_t timeout_ms) {

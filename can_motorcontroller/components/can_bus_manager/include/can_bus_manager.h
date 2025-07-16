@@ -31,8 +31,8 @@ typedef enum {
 
 typedef struct {
     uint32_t can_id;
-    QueueHandle_t queue;
-} can_subscription_t;
+    uint8_t queue_size;
+} can_subscription_spec_t;
 
 /**
  * @brief Initialize CAN bus manager
@@ -63,11 +63,27 @@ esp_err_t can_bus_send_message(const can_message_t *message, uint32_t timeout_ms
 esp_err_t can_bus_subscribe_id(uint32_t can_id, uint8_t queue_size);
 
 /**
+ * @brief Subscribe to multiple CAN IDs in one call
+ * @param specs Array of CAN ID and queue size specifications
+ * @param count Number of specifications
+ * @return ESP_OK on success
+ */
+esp_err_t can_subscribe_multiple(const can_subscription_spec_t *specs, size_t count);
+
+/**
  * @brief Unsubscribe from a CAN ID
  * @param can_id CAN ID to unsubscribe from
  * @return ESP_OK on success
  */
 esp_err_t can_bus_unsubscribe_id(uint32_t can_id);
+
+/**
+ * @brief Unsubscribe from multiple CAN IDs
+ * @param can_ids Array of CAN IDs to unsubscribe from
+ * @param count Number of IDs
+ * @return ESP_OK on success
+ */
+esp_err_t can_unsubscribe_multiple(const uint32_t *can_ids, size_t count);
 
 /**
  * @brief Wait for a message on a subscribed CAN ID

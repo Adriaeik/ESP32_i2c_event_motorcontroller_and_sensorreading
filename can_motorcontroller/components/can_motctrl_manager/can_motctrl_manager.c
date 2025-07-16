@@ -6,78 +6,62 @@
 
 static const char *TAG = "MOTCTRL_MANAGER";
 
-esp_err_t start_worker(const motorcontroller_pkg_t *pkg, uint32_t timeout_ms, uint8_t retries)
+esp_err_t start_worker(const motorcontroller_pkg_t *pkg, uint32_t timeout_ms)
 {
-    esp_err_t ret;
-    
-    // Subscribe to response IDs BEFORE sending package
-    // Start and end frames: small queue (1-2), data frames: larger queue based on expected fragments
-    ret = subscribe_fragment_ids(CAN_ID_MOTCTRL_RESP_START, 
-                                CAN_ID_MOTCTRL_RESP_DATA, 
-                                CAN_ID_MOTCTRL_RESP_END,
-                                2,    // start queue size
-                                60,   // data queue size (based on your 53 fragments)
-                                2);   // end queue size
+    esp_err_t ret = can_subscribe_set(CAN_SUBSCRIPTION_SET_MANAGER);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to subscribe to response IDs");
+        ESP_LOGE(TAG, "Manager failed to subscribe to response channels");
         return ret;
     }
     
-    // Serialize package
+    // Serialize and send package
     can_fragment_list_t pkg_frag_list = {0};
     ret = can_serialize_pkg(pkg, &pkg_frag_list);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Package serialization failed");
-        unsubscribe_fragment_ids(CAN_ID_MOTCTRL_RESP_START, 
-                                CAN_ID_MOTCTRL_RESP_DATA, 
-                                CAN_ID_MOTCTRL_RESP_END);
-        return ret;
+        goto cleanup;
     }
     
-    // Send package fragments with retries
-    for (int attempt = 0; attempt <= retries; attempt++) {
-        ret = send_fragment_list(CAN_ID_MOTCTRL_PKG_START, 
-                                CAN_ID_MOTCTRL_PKG_DATA, 
-                                CAN_ID_MOTCTRL_PKG_END, 
-                                &pkg_frag_list);
-        if (ret == ESP_OK) {
-            break;
-        }
-        ESP_LOGW(TAG, "Send attempt %d failed, retrying...", attempt + 1);
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
+    
+    ret = send_fragment_list_simple_ack(CAN_ID_MOTCTRL_PKG_START, 
+                                        CAN_ID_MOTCTRL_PKG_DATA, 
+                                        CAN_ID_MOTCTRL_PKG_END,
+                                        CAN_ID_MOTCTRL_PKG_ACK, 
+                                        &pkg_frag_list,
+                                        timeout_ms);
     
     can_fragment_list_free(&pkg_frag_list);
     
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to send package after %d attempts", retries + 1);
-        unsubscribe_fragment_ids(CAN_ID_MOTCTRL_RESP_START, 
-                                CAN_ID_MOTCTRL_RESP_DATA, 
-                                CAN_ID_MOTCTRL_RESP_END);
+        ESP_LOGE(TAG, "Failed to send package with ACK confirmation");
+        goto cleanup;
     }
     
+    ESP_LOGI(TAG, "Package sent successfully with ACK confirmation");
+    return ESP_OK;
+    
+cleanup:
+    // Clean unsubscribe
+    can_unsubscribe_set(CAN_SUBSCRIPTION_SET_MANAGER);
     return ret;
 }
 
-esp_err_t wait_for_worker(motorcontroller_response_t *resp, uint32_t wait_offset_ms, uint32_t timeout_ms)
-{
-    // Wait for worker to start processing
+esp_err_t wait_for_worker(motorcontroller_response_t *resp, uint32_t wait_offset_ms, uint32_t timeout_ms) {
     if (wait_offset_ms > 0) {
         vTaskDelay(pdMS_TO_TICKS(wait_offset_ms));
     }
     
-    // Receive response using subscription system
+    // FIXED: Receive with correct ACK ID (0x108 - manager sends ACK here)
     can_fragment_list_t resp_frag_list = {0};
-    esp_err_t ret = receive_fragment_list(CAN_ID_MOTCTRL_RESP_START, 
-                                         CAN_ID_MOTCTRL_RESP_DATA, 
-                                         CAN_ID_MOTCTRL_RESP_END, 
-                                         &resp_frag_list,
-                                         timeout_ms);
+    esp_err_t ret = receive_fragment_list_simple_ack(CAN_ID_MOTCTRL_RESP_START, 
+                                                     CAN_ID_MOTCTRL_RESP_DATA, 
+                                                     CAN_ID_MOTCTRL_RESP_END,
+                                                     CAN_ID_MOTCTRL_RESP_ACK,
+                                                     &resp_frag_list,
+                                                     timeout_ms);
     
-    // Clean up subscriptions after receiving (or failure)
-    unsubscribe_fragment_ids(CAN_ID_MOTCTRL_RESP_START, 
-                            CAN_ID_MOTCTRL_RESP_DATA, 
-                            CAN_ID_MOTCTRL_RESP_END);
+    // Clean up subscriptions
+    can_unsubscribe_set(CAN_SUBSCRIPTION_SET_MANAGER); 
     
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to receive response fragments");
@@ -88,8 +72,29 @@ esp_err_t wait_for_worker(motorcontroller_response_t *resp, uint32_t wait_offset
     ret = can_deserialize_resp(&resp_frag_list, resp);
     can_fragment_list_free(&resp_frag_list);
     
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "Response received and acknowledged successfully");
+    }
+    
     return ret;
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 void manager_task(void *arg)
 {
@@ -99,9 +104,9 @@ void manager_task(void *arg)
         // Create work package
         motorcontroller_pkg_t pkg;
         motorcontroller_pkg_init_default(&pkg);
-        
+        print_motorcontroller_pkg_info(&pkg, "Manager");
         // Send to worker with retries
-        esp_err_t ret = start_worker(&pkg, 1000, 3);
+        esp_err_t ret = start_worker(&pkg, 5000);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to start worker");
             vTaskDelay(pdMS_TO_TICKS(5000));
@@ -122,6 +127,7 @@ void manager_task(void *arg)
         } else {
             ESP_LOGE(TAG, "Failed to get response: %s", esp_err_to_name(ret));
         }
+        print_motorcontroller_response_info(&resp, "Manager");
         
         vTaskDelay(pdMS_TO_TICKS(10000));  // Wait before next cycle
     }

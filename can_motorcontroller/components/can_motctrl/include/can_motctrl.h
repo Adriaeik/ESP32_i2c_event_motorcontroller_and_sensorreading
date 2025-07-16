@@ -12,51 +12,50 @@
 extern "C" {
 #endif
 
+typedef enum {
+    CAN_SUBSCRIPTION_SET_MANAGER,    // Subscribe to response channels
+    CAN_SUBSCRIPTION_SET_WORKER      // Subscribe to package channels
+} can_subscription_set_t;
+
+/**
+ * @brief Subscribe to a predefined set of CAN IDs
+ * @param set Which subscription set to use
+ * @return ESP_OK on success
+ */
+esp_err_t can_subscribe_set(can_subscription_set_t set);
+
+/**
+ * @brief Unsubscribe from a predefined set of CAN IDs
+ * @param set Which subscription set to unsubscribe from
+ * @return ESP_OK on success
+ */
+esp_err_t can_unsubscribe_set(can_subscription_set_t set);
+
 /**
  * @brief Send a fragmented message list
  * @param start_id CAN ID for start frame
  * @param data_id CAN ID for data fragments
  * @param end_id CAN ID for end frame
+ * @param ack_id CAN ID for ack
  * @param frag_list Fragment list to send
  * @return ESP_OK on success
  */
-esp_err_t send_fragment_list(uint32_t start_id, uint32_t data_id, uint32_t end_id, 
-                             const can_fragment_list_t *frag_list);
+esp_err_t send_fragment_list_simple_ack(uint32_t start_id, uint32_t data_id, uint32_t end_id, uint32_t ack_id,
+                                        const can_fragment_list_t *frag_list, uint32_t timeout_ms);
 
 /**
  * @brief Receive a fragmented message list using subscription system
  * @param start_id CAN ID for start frame
  * @param data_id CAN ID for data fragments  
  * @param end_id CAN ID for end frame
+ * @param ack_id CAN ID for ack
  * @param frag_list Output fragment list
  * @param timeout_ms Timeout for each message
  * @return ESP_OK on success
  * @note You must subscribe to the IDs before calling this function
  */
-esp_err_t receive_fragment_list(uint32_t start_id, uint32_t data_id, uint32_t end_id, 
-                                can_fragment_list_t *frag_list, uint32_t timeout_ms);
-
-/**
- * @brief Subscribe to all IDs needed for fragmented communication
- * @param start_id CAN ID for start frame
- * @param data_id CAN ID for data fragments
- * @param end_id CAN ID for end frame
- * @param start_queue_size Queue size for start frame (typically 1-2)
- * @param data_queue_size Queue size for data fragments (should match expected fragment count)
- * @param end_queue_size Queue size for end frame (typically 1-2)
- * @return ESP_OK on success
- */
-esp_err_t subscribe_fragment_ids(uint32_t start_id, uint32_t data_id, uint32_t end_id, 
-                                 uint8_t start_queue_size, uint8_t data_queue_size, uint8_t end_queue_size);
-
-/**
- * @brief Unsubscribe from fragment IDs
- * @param start_id CAN ID for start frame
- * @param data_id CAN ID for data fragments
- * @param end_id CAN ID for end frame
- * @return ESP_OK on success
- */
-esp_err_t unsubscribe_fragment_ids(uint32_t start_id, uint32_t data_id, uint32_t end_id);
+esp_err_t receive_fragment_list_simple_ack(uint32_t start_id, uint32_t data_id, uint32_t end_id, uint32_t ack_id,
+                                           can_fragment_list_t *frag_list, uint32_t timeout_ms);
 
 #ifdef __cplusplus
 }

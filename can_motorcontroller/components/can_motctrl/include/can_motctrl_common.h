@@ -23,6 +23,8 @@ extern "C" {
 #define CAN_ID_MOTCTRL_RESP_START   0x105   // Response start frame
 #define CAN_ID_MOTCTRL_RESP_DATA    0x106   // Response data frames
 #define CAN_ID_MOTCTRL_RESP_END     0x107   // Response end frame
+#define CAN_ID_MOTCTRL_RESP_ACK     0x108   // 
+#define CAN_ID_MOTCTRL_PKG_ACK      0x109   // 
 
 // Operation timeouts (use config values with fallbacks)
 #ifdef CONFIG_CAN_MOTCTRL_DEFAULT_TIMEOUT_SEC
@@ -30,6 +32,7 @@ extern "C" {
 #else
     #define CAN_MOTCTRL_DEFAULT_TIMEOUT     30
 #endif
+#define CAN_ACK_TIMEOUT_MS CAN_MOTCTRL_DEFAULT_TIMEOUT
 
 #ifdef CONFIG_CAN_MOTCTRL_MIN_TIMEOUT_SEC
     #define CAN_MOTCTRL_MIN_TIMEOUT         CONFIG_CAN_MOTCTRL_MIN_TIMEOUT_SEC
@@ -50,6 +53,9 @@ extern "C" {
     #define MAX_FRAGMENT_SIZE               1024
 #endif
 
+#define CAN_MAX_RETRIES 3
+#define CAN_RETRY_BASE_DELAY_MS 100  // Base delay for retries
+
 // Worker status codes (sent over CAN)
 typedef enum {
     WORKER_STATUS_IDLE         = 0x00,
@@ -58,6 +64,8 @@ typedef enum {
     WORKER_STATUS_RESP_READY   = 0x03,
     WORKER_STATUS_ERROR        = 0xFF
 } worker_status_t;
+
+
 
 // Common error codes (in addition to standard ESP error codes)
 #define ESP_ERR_MOTCTRL_BASE            0x6000

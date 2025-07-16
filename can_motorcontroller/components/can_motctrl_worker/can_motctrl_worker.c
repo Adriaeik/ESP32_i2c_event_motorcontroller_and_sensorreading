@@ -6,14 +6,15 @@
 
 static const char *TAG = "MOTCTRL_WORKER";
 
-esp_err_t receive_work_package(motorcontroller_pkg_t *pkg, uint32_t timeout_ms)
-{
+esp_err_t receive_work_package(motorcontroller_pkg_t *pkg, uint32_t timeout_ms) {
+    // FIXED: Receive with correct ACK ID (0x103 - worker sends ACK here)
     can_fragment_list_t pkg_frag_list = {0};
-    esp_err_t ret = receive_fragment_list(CAN_ID_MOTCTRL_PKG_START, 
-                                         CAN_ID_MOTCTRL_PKG_DATA, 
-                                         CAN_ID_MOTCTRL_PKG_END, 
-                                         &pkg_frag_list,
-                                         timeout_ms);
+    esp_err_t ret = receive_fragment_list_simple_ack(CAN_ID_MOTCTRL_PKG_START, 
+                                                     CAN_ID_MOTCTRL_PKG_DATA, 
+                                                     CAN_ID_MOTCTRL_PKG_END,
+                                                     CAN_ID_MOTCTRL_PKG_ACK,  // 0x103 - worker sends ACK here
+                                                     &pkg_frag_list,
+                                                     timeout_ms);
     if (ret != ESP_OK) {
         return ret;
     }
@@ -24,8 +25,7 @@ esp_err_t receive_work_package(motorcontroller_pkg_t *pkg, uint32_t timeout_ms)
     return ret;
 }
 
-esp_err_t send_work_response(const motorcontroller_response_t *resp, uint32_t timeout_ms, uint8_t retries)
-{
+esp_err_t send_work_response(const motorcontroller_response_t *resp, uint32_t timeout_ms) {
     // Serialize response
     can_fragment_list_t resp_frag_list = {0};
     esp_err_t ret = can_serialize_resp(resp, &resp_frag_list);
@@ -33,40 +33,41 @@ esp_err_t send_work_response(const motorcontroller_response_t *resp, uint32_t ti
         return ret;
     }
     
-    // Send with retries
-    for (int attempt = 0; attempt <= retries; attempt++) {
-        ret = send_fragment_list(CAN_ID_MOTCTRL_RESP_START, 
-                                CAN_ID_MOTCTRL_RESP_DATA, 
-                                CAN_ID_MOTCTRL_RESP_END, 
-                                &resp_frag_list);
-        if (ret == ESP_OK) {
-            break;
-        }
-        ESP_LOGW(TAG, "Response send attempt %d failed, retrying...", attempt + 1);
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
+    // FIXED: Send with correct ACK ID (0x108 - manager sends ACK here)
+    ret = send_fragment_list_simple_ack(CAN_ID_MOTCTRL_RESP_START, 
+                                        CAN_ID_MOTCTRL_RESP_DATA, 
+                                        CAN_ID_MOTCTRL_RESP_END,
+                                        CAN_ID_MOTCTRL_RESP_ACK,  // 0x108 - manager sends ACK here
+                                        &resp_frag_list,
+                                        timeout_ms);
     
     can_fragment_list_free(&resp_frag_list);
+    
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "Response sent successfully with ACK confirmation");
+    } else {
+        ESP_LOGE(TAG, "Failed to send response with ACK: %s", esp_err_to_name(ret));
+    }
+    
     return ret;
 }
 
-void worker_task(void *arg)
-{
+
+
+
+
+
+void worker_task(void *arg) {
     ESP_LOGI(TAG, "Worker task started");
     
-    // Subscribe to package IDs at startup - these stay subscribed for the lifetime of the task
-    esp_err_t ret = subscribe_fragment_ids(CAN_ID_MOTCTRL_PKG_START, 
-                                          CAN_ID_MOTCTRL_PKG_DATA, 
-                                          CAN_ID_MOTCTRL_PKG_END,
-                                          2,    // start queue size
-                                          60,   // data queue size (based on your 53 fragments)
-                                          2);   // end queue size
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to subscribe to package IDs, worker cannot function");
+    // Subscribe once at startup
+    esp_err_t ret ;
+    if (can_subscribe_set(CAN_SUBSCRIPTION_SET_WORKER) != ESP_OK) {
+        ESP_LOGE(TAG, "Worker failed to subscribe to package channels, cannot function");
         return;
     }
     
-    ESP_LOGI(TAG, "Worker subscribed to package IDs, ready to receive work");
+    ESP_LOGI(TAG, "Worker subscribed to package channels, ready to receive work");
     
     while (1) {
         // Wait for work package
@@ -74,7 +75,9 @@ void worker_task(void *arg)
         ret = receive_work_package(&pkg, portMAX_DELAY);
         
         if (ret == ESP_OK) {
-            // Simulate work based on package
+            print_motorcontroller_pkg_info(&pkg, "Worker");
+            
+            // Simulate work
             int work_time = calculate_operation_timeout(
                 pkg.STATE, pkg.prev_estimated_cm_per_s, pkg.rising_timeout_percent,
                 pkg.end_depth, pkg.static_points, pkg.samples, pkg.static_poll_interval_s
@@ -83,26 +86,20 @@ void worker_task(void *arg)
             ESP_LOGI(TAG, "Starting work for %d seconds", work_time);
             vTaskDelay(pdMS_TO_TICKS(work_time * 1000));
             
-            // Create response
+            // Create and send response
             motorcontroller_response_t resp;
             motorcontroller_response_init_default(&resp);
             resp.result = ESP_OK;
             resp.working_time = work_time;
             
-            // Send response
-            ret = send_work_response(&resp, 1000, 3);
+            print_motorcontroller_response_info(&resp, "Worker");
+            ret = send_work_response(&resp, 5000);  // 5 second timeout
             if (ret != ESP_OK) {
                 ESP_LOGE(TAG, "Failed to send response: %s", esp_err_to_name(ret));
             }
         } else {
             ESP_LOGE(TAG, "Failed to receive package: %s", esp_err_to_name(ret));
-            // Small delay before retrying to avoid spam
-            vTaskDelay(pdMS_TO_TICKS(1000));
+            vTaskDelay(pdMS_TO_TICKS(1000));  // Brief pause before retry
         }
     }
-    
-    // Cleanup subscriptions if task ever exits (unlikely)
-    unsubscribe_fragment_ids(CAN_ID_MOTCTRL_PKG_START, 
-                            CAN_ID_MOTCTRL_PKG_DATA, 
-                            CAN_ID_MOTCTRL_PKG_END);
 }
