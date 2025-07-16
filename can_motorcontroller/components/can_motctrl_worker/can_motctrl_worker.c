@@ -42,6 +42,7 @@ esp_err_t send_work_response(const motorcontroller_response_t *resp, uint32_t ti
         if (ret == ESP_OK) {
             break;
         }
+        ESP_LOGW(TAG, "Response send attempt %d failed, retrying...", attempt + 1);
         vTaskDelay(pdMS_TO_TICKS(100));
     }
     
@@ -51,10 +52,26 @@ esp_err_t send_work_response(const motorcontroller_response_t *resp, uint32_t ti
 
 void worker_task(void *arg)
 {
+    ESP_LOGI(TAG, "Worker task started");
+    
+    // Subscribe to package IDs at startup - these stay subscribed for the lifetime of the task
+    esp_err_t ret = subscribe_fragment_ids(CAN_ID_MOTCTRL_PKG_START, 
+                                          CAN_ID_MOTCTRL_PKG_DATA, 
+                                          CAN_ID_MOTCTRL_PKG_END,
+                                          2,    // start queue size
+                                          60,   // data queue size (based on your 53 fragments)
+                                          2);   // end queue size
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to subscribe to package IDs, worker cannot function");
+        return;
+    }
+    
+    ESP_LOGI(TAG, "Worker subscribed to package IDs, ready to receive work");
+    
     while (1) {
         // Wait for work package
         motorcontroller_pkg_t pkg;
-        esp_err_t ret = receive_work_package(&pkg, portMAX_DELAY);
+        ret = receive_work_package(&pkg, portMAX_DELAY);
         
         if (ret == ESP_OK) {
             // Simulate work based on package
@@ -73,9 +90,19 @@ void worker_task(void *arg)
             resp.working_time = work_time;
             
             // Send response
-            send_work_response(&resp, 1000, 3);
+            ret = send_work_response(&resp, 1000, 3);
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to send response: %s", esp_err_to_name(ret));
+            }
         } else {
             ESP_LOGE(TAG, "Failed to receive package: %s", esp_err_to_name(ret));
+            // Small delay before retrying to avoid spam
+            vTaskDelay(pdMS_TO_TICKS(1000));
         }
     }
+    
+    // Cleanup subscriptions if task ever exits (unlikely)
+    unsubscribe_fragment_ids(CAN_ID_MOTCTRL_PKG_START, 
+                            CAN_ID_MOTCTRL_PKG_DATA, 
+                            CAN_ID_MOTCTRL_PKG_END);
 }

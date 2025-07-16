@@ -36,8 +36,13 @@
     "can_motctrl_worker.h": "c",
     "esp_err.h": "c",
     "string.h": "c",
-    "can_serde_helper.h": "c"
+    "can_serde_helper.h": "c",
+    "can_motctrl.h": "c",
+    "semphr.h": "c",
+    "can_motctrl_common.h": "c",
+    "system_error": "c",
+    "random": "c"
   },
   "idf.flashType": "UART",
-  "idf.portWin": "COM4"
+  "idf.portWin": "COM15"
 }

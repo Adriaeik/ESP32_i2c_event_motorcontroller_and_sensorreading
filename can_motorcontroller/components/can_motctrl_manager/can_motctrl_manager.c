@@ -8,11 +8,29 @@ static const char *TAG = "MOTCTRL_MANAGER";
 
 esp_err_t start_worker(const motorcontroller_pkg_t *pkg, uint32_t timeout_ms, uint8_t retries)
 {
+    esp_err_t ret;
+    
+    // Subscribe to response IDs BEFORE sending package
+    // Start and end frames: small queue (1-2), data frames: larger queue based on expected fragments
+    ret = subscribe_fragment_ids(CAN_ID_MOTCTRL_RESP_START, 
+                                CAN_ID_MOTCTRL_RESP_DATA, 
+                                CAN_ID_MOTCTRL_RESP_END,
+                                2,    // start queue size
+                                60,   // data queue size (based on your 53 fragments)
+                                2);   // end queue size
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to subscribe to response IDs");
+        return ret;
+    }
+    
     // Serialize package
     can_fragment_list_t pkg_frag_list = {0};
-    esp_err_t ret = can_serialize_pkg(pkg, &pkg_frag_list);
+    ret = can_serialize_pkg(pkg, &pkg_frag_list);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Package serialization failed");
+        unsubscribe_fragment_ids(CAN_ID_MOTCTRL_RESP_START, 
+                                CAN_ID_MOTCTRL_RESP_DATA, 
+                                CAN_ID_MOTCTRL_RESP_END);
         return ret;
     }
     
@@ -25,10 +43,19 @@ esp_err_t start_worker(const motorcontroller_pkg_t *pkg, uint32_t timeout_ms, ui
         if (ret == ESP_OK) {
             break;
         }
+        ESP_LOGW(TAG, "Send attempt %d failed, retrying...", attempt + 1);
         vTaskDelay(pdMS_TO_TICKS(100));
     }
     
     can_fragment_list_free(&pkg_frag_list);
+    
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to send package after %d attempts", retries + 1);
+        unsubscribe_fragment_ids(CAN_ID_MOTCTRL_RESP_START, 
+                                CAN_ID_MOTCTRL_RESP_DATA, 
+                                CAN_ID_MOTCTRL_RESP_END);
+    }
+    
     return ret;
 }
 
@@ -39,13 +66,19 @@ esp_err_t wait_for_worker(motorcontroller_response_t *resp, uint32_t wait_offset
         vTaskDelay(pdMS_TO_TICKS(wait_offset_ms));
     }
     
-    // Receive response
+    // Receive response using subscription system
     can_fragment_list_t resp_frag_list = {0};
     esp_err_t ret = receive_fragment_list(CAN_ID_MOTCTRL_RESP_START, 
                                          CAN_ID_MOTCTRL_RESP_DATA, 
                                          CAN_ID_MOTCTRL_RESP_END, 
                                          &resp_frag_list,
                                          timeout_ms);
+    
+    // Clean up subscriptions after receiving (or failure)
+    unsubscribe_fragment_ids(CAN_ID_MOTCTRL_RESP_START, 
+                            CAN_ID_MOTCTRL_RESP_DATA, 
+                            CAN_ID_MOTCTRL_RESP_END);
+    
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to receive response fragments");
         return ret;
@@ -60,6 +93,8 @@ esp_err_t wait_for_worker(motorcontroller_response_t *resp, uint32_t wait_offset
 
 void manager_task(void *arg)
 {
+    ESP_LOGI(TAG, "Manager task started");
+    
     while (1) {
         // Create work package
         motorcontroller_pkg_t pkg;

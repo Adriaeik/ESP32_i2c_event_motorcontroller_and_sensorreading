@@ -1,43 +1,15 @@
-#ifndef CAN_BUS_MANAGER_H
-#define CAN_BUS_MANAGER_H
-
-#include "esp_err.h"
-#include "driver/twai.h"  // Updated to TWAI driver
+#pragma once
+#include "driver/twai.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
-#include "esp_log.h"
-#include "freertos/task.h"
-
-// Bus statistics structure
-typedef struct {
-    uint32_t messages_sent;
-    uint32_t messages_received;
-    uint32_t errors_count;
-    uint32_t bus_off_count;
-} can_bus_stats_t;
-
-// Priority levels for message transmission
-typedef enum {
-    CAN_PRIORITY_LOW = 0,
-    CAN_PRIORITY_NORMAL,
-    CAN_PRIORITY_HIGH,
-    CAN_PRIORITY_CRITICAL,
-    CAN_PRIORITY_MAX
-} can_priority_t;
+#include "freertos/queue.h"
+#include <stdint.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-// typedef union {
-//     twai_message_t twai;
-//     struct {
-//         uint32_t identifier;
-//         uint8_t data_length_code;
-//         uint8_t flags;
-//         uint8_t reserved;
-//         uint8_t data[8];
-//     };
-// } can_message_t;
+
+
 typedef twai_message_t can_message_t;
 
 enum {
@@ -48,50 +20,64 @@ enum {
     CAN_MSG_FLAG_SELF = TWAI_MSG_FLAG_SELF,
     CAN_MSG_FLAG_DLC_NON_COMP = TWAI_MSG_FLAG_DLC_NON_COMP
 };
+
+typedef enum {
+    CAN_PRIORITY_LOW = 0,
+    CAN_PRIORITY_NORMAL,
+    CAN_PRIORITY_HIGH,
+    CAN_PRIORITY_CRITICAL,
+    CAN_PRIORITY_MAX
+} can_priority_t;
+
+typedef struct {
+    uint32_t can_id;
+    QueueHandle_t queue;
+} can_subscription_t;
+
 /**
- * @brief Initialize the CAN bus manager
+ * @brief Initialize CAN bus manager
  * @return ESP_OK on success
  */
 esp_err_t can_bus_manager_init(void);
 
 /**
- * @brief Deinitialize the CAN bus manager
+ * @brief Deinitialize CAN bus manager
  * @return ESP_OK on success
  */
 esp_err_t can_bus_manager_deinit(void);
 
 /**
- * @brief Send a CAN message with priority (thread-safe)
- * @param message CAN message to send
- * @param priority Message priority
+ * @brief Send a CAN message
+ * @param message Message to send
  * @param timeout_ms Timeout in milliseconds
  * @return ESP_OK on success
  */
-esp_err_t can_bus_send_message(const can_message_t *message, can_priority_t priority, uint32_t timeout_ms);
+esp_err_t can_bus_send_message(const can_message_t *message, uint32_t timeout_ms);
 
 /**
- * @brief Receive a CAN message (thread-safe)
- * @param message Buffer for received message
+ * @brief Subscribe to messages with specific CAN ID
+ * @param can_id CAN ID to subscribe to
+ * @param queue_size Size of the message queue
+ * @return ESP_OK on success
+ */
+esp_err_t can_bus_subscribe_id(uint32_t can_id, uint8_t queue_size);
+
+/**
+ * @brief Unsubscribe from a CAN ID
+ * @param can_id CAN ID to unsubscribe from
+ * @return ESP_OK on success
+ */
+esp_err_t can_bus_unsubscribe_id(uint32_t can_id);
+
+/**
+ * @brief Wait for a message on a subscribed CAN ID
+ * @param can_id CAN ID to wait for
+ * @param msg Output message (stack-allocated)
  * @param timeout_ms Timeout in milliseconds
  * @return ESP_OK on success
  */
-esp_err_t can_bus_receive_message(can_message_t *message, uint32_t timeout_ms);
-
-/**
- * @brief Get bus statistics
- * @param stats Pointer to statistics structure
- * @return ESP_OK on success
- */
-esp_err_t can_bus_get_stats(can_bus_stats_t *stats);
-
-/**
- * @brief Reset bus statistics
- * @return ESP_OK on success
- */
-esp_err_t can_bus_reset_stats(void);
+esp_err_t can_bus_wait_for_message(uint32_t can_id, can_message_t *msg, uint32_t timeout_ms);
 
 #ifdef __cplusplus
 }
 #endif
-
-#endif // CAN_BUS_MANAGER_H
