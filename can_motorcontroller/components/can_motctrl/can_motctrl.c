@@ -3,6 +3,110 @@
 
 static const char *TAG = "CAN_MOTCTRL";
 
+typedef struct{
+   uint32_t start_id;
+   uint32_t data_id;
+   uint32_t end_id;
+   uint32_t ack_id;
+} fragment_ids_t; 
+// Predefined fragment ID sets
+const fragment_ids_t MANAGER_TO_WORKER_IDS = {
+    .start_id = CAN_ID_MOTCTRL_PKG_START,
+    .data_id = CAN_ID_MOTCTRL_PKG_DATA,
+    .end_id = CAN_ID_MOTCTRL_PKG_END,
+    .ack_id = CAN_ID_MOTCTRL_PKG_ACK
+};
+
+const fragment_ids_t WORKER_TO_MANAGER_IDS = {
+    .start_id = CAN_ID_MOTCTRL_RESP_START,
+    .data_id = CAN_ID_MOTCTRL_RESP_DATA,
+    .end_id = CAN_ID_MOTCTRL_RESP_END,
+    .ack_id = CAN_ID_MOTCTRL_RESP_ACK
+};
+
+typedef enum {
+    CAN_SUBSCRIPTION_SET_MANAGER,    // Subscribe to response channels
+    CAN_SUBSCRIPTION_SET_WORKER      // Subscribe to package channels
+} can_subscription_set_t;
+
+// Predefined subscription sets
+static const can_subscription_spec_t manager_specs[] = {
+    {CAN_ID_MOTCTRL_RESP_START, 2},
+    {CAN_ID_MOTCTRL_RESP_DATA, 60},
+    {CAN_ID_MOTCTRL_RESP_END, 2},
+    {CAN_ID_MOTCTRL_RESP_ACK, 5}
+};
+static const can_subscription_spec_t worker_specs[] = {
+    {CAN_ID_MOTCTRL_PKG_START, 2},
+    {CAN_ID_MOTCTRL_PKG_DATA, 60},
+    {CAN_ID_MOTCTRL_PKG_END, 2},
+    {CAN_ID_MOTCTRL_PKG_ACK, 5}
+};
+static const uint32_t manager_ids[] = {
+    CAN_ID_MOTCTRL_RESP_START, CAN_ID_MOTCTRL_RESP_DATA,
+    CAN_ID_MOTCTRL_RESP_END, CAN_ID_MOTCTRL_RESP_ACK
+};
+
+static const uint32_t worker_ids[] = {
+    CAN_ID_MOTCTRL_PKG_START, CAN_ID_MOTCTRL_PKG_DATA,
+    CAN_ID_MOTCTRL_PKG_END, CAN_ID_MOTCTRL_PKG_ACK
+};
+    
+
+/**
+ * @brief Subscribe to a predefined set of CAN IDs
+ * @param set Which subscription set to use
+ * @return ESP_OK on success
+ */
+esp_err_t can_subscribe_set(const can_motctrl_role_t role) {
+    const can_subscription_spec_t *specs;
+    size_t count;
+    switch (role) {
+        case CAN_MTOTCTRL_MANAGER:
+            specs = manager_specs;
+            count = sizeof(manager_specs) / sizeof(manager_specs[0]);
+            ESP_LOGI("CAN_SUB_SET", "Subscribing to MANAGER response channels");
+            break;
+            
+        case CAN_MTOTCTRL_WORKER:
+            specs = worker_specs;
+            count = sizeof(worker_specs) / sizeof(worker_specs[0]);
+            ESP_LOGI("CAN_SUB_SET", "Subscribing to WORKER package channels");
+            break;
+            
+        default:
+            ESP_LOGE("CAN_SUB_SET", "Invalid subscription set: %d", role);
+            return ESP_ERR_INVALID_ARG;
+    }
+    
+    return can_subscribe_multiple(specs, count);
+}
+
+esp_err_t can_unsubscribe_set(const can_motctrl_role_t role) {
+    const uint32_t *ids;
+    size_t count;
+    switch (role) {
+        case CAN_MTOTCTRL_MANAGER:
+            ids = manager_ids;
+            count = sizeof(manager_ids) / sizeof(manager_ids[0]);
+            ESP_LOGI("CAN_UNSUB_SET", "Unsubscribing from MANAGER channels");
+            break;
+            
+        case CAN_MTOTCTRL_WORKER:
+            ids = worker_ids;
+            count = sizeof(worker_ids) / sizeof(worker_ids[0]);
+            ESP_LOGI("CAN_UNSUB_SET", "Unsubscribing from WORKER channels");
+            break;
+            
+        default:
+            ESP_LOGE("CAN_UNSUB_SET", "Invalid subscription set: %d", role);
+            return ESP_ERR_INVALID_ARG;
+    }
+    
+    return can_unsubscribe_multiple(ids, count);
+}
+
+
 // Simple ACK/NACK message structure (8 bytes)
 typedef struct {
     uint8_t message_type;     // 0x01 = ACK, 0x02 = NACK
@@ -147,25 +251,23 @@ esp_err_t receive_fragment_list(uint32_t start_id, uint32_t data_id, uint32_t en
     return ESP_OK;
 }
 
-// could rewrite this to take in a struct like
-typedef struct{
-   uint32_t start_id;
-   uint32_t data_id;
-   uint32_t end_id;
-   uint32_t ack_id;
-} fragment_ids; 
 
-esp_err_t send_fragment_list_simple_ack(uint32_t start_id, uint32_t data_id, uint32_t end_id, uint32_t ack_id,
-                                        const can_fragment_list_t *frag_list, uint32_t timeout_ms)
+esp_err_t send_fragment_list_simple_ack(const can_motctrl_role_t role, const can_fragment_list_t *frag_list, uint32_t timeout_ms)
 {
     esp_err_t ret;
-    
+    const fragment_ids_t *ids;
+    switch (role) {
+        case CAN_MTOTCTRL_MANAGER: ids = &MANAGER_TO_WORKER_IDS; break;
+        case CAN_MTOTCTRL_WORKER:  ids = &WORKER_TO_MANAGER_IDS; break;
+        default:
+            return ESP_ERR_INVALID_ARG;
+    }
     for (int retry = 0; retry < CAN_MAX_RETRIES; retry++) {
         ESP_LOGI(TAG, "Transmission attempt %d/%d (expecting ACK on 0x%X)", 
-                 retry + 1, CAN_MAX_RETRIES, ack_id);
+                 retry + 1, CAN_MAX_RETRIES, ids->ack_id);
         
         // Send fragments
-        ret = send_fragment_list(start_id, data_id, end_id, frag_list);
+        ret = send_fragment_list(ids->start_id, ids->data_id, ids->end_id, frag_list);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to send fragments, attempt %d: %s", retry + 1, esp_err_to_name(ret));
             continue;
@@ -173,17 +275,17 @@ esp_err_t send_fragment_list_simple_ack(uint32_t start_id, uint32_t data_id, uin
         
         // Wait for ACK with validation
         bool received_ack = false;
-        ret = wait_for_simple_ack(ack_id, CAN_ACK_TIMEOUT_MS, &received_ack, frag_list->count);
+        ret = wait_for_simple_ack(ids->ack_id, CAN_ACK_TIMEOUT_MS, &received_ack, frag_list->count);
         
         if (ret == ESP_OK && received_ack) {
-            ESP_LOGI(TAG, "Transmission successful with ACK confirmation on 0x%X", ack_id);
+            ESP_LOGI(TAG, "Transmission successful with ACK confirmation on 0x%X", ids->ack_id);
             return ESP_OK;
         }
         
         if (ret == ESP_ERR_TIMEOUT) {
-            ESP_LOGW(TAG, "ACK timeout on 0x%X, retry %d", ack_id, retry);
+            ESP_LOGW(TAG, "ACK timeout on 0x%X, retry %d", ids->ack_id, retry);
         } else if (ret == ESP_OK && !received_ack) {
-            ESP_LOGW(TAG, "Received NACK on 0x%X, retry %d", ack_id, retry);
+            ESP_LOGW(TAG, "Received NACK on 0x%X, retry %d", ids->ack_id, retry);
         }
         
         // FIXED: Linear backoff instead of exponential
@@ -194,113 +296,34 @@ esp_err_t send_fragment_list_simple_ack(uint32_t start_id, uint32_t data_id, uin
         }
     }
     
-    ESP_LOGE(TAG, "Failed to send with ACK after %d retries (ACK ID: 0x%X)", CAN_MAX_RETRIES, ack_id);
+    ESP_LOGE(TAG, "Failed to send with ACK after %d retries (ACK ID: 0x%X)", CAN_MAX_RETRIES, ids->ack_id);
     return ESP_ERR_TIMEOUT;
 }
 
-esp_err_t receive_fragment_list_simple_ack(uint32_t start_id, uint32_t data_id, uint32_t end_id, uint32_t ack_id,
-                                           can_fragment_list_t *frag_list, uint32_t timeout_ms) {
+esp_err_t receive_fragment_list_simple_ack(const can_motctrl_role_t role, const can_fragment_list_t *frag_list, uint32_t timeout_ms) {
     // Receive fragments
-    esp_err_t ret = receive_fragment_list(start_id, data_id, end_id, frag_list, timeout_ms);
+    const fragment_ids_t *ids;
+    switch (role) {
+        case CAN_MTOTCTRL_MANAGER: ids = &WORKER_TO_MANAGER_IDS; break;
+        case CAN_MTOTCTRL_WORKER:  ids = &MANAGER_TO_WORKER_IDS; break;
+        default:
+            return ESP_ERR_INVALID_ARG;
+    }
+    esp_err_t ret = receive_fragment_list(ids->start_id, ids->data_id, ids->end_id, frag_list, timeout_ms);
     
     if (ret == ESP_OK) {
         // Send ACK with fragment count confirmation
-        send_simple_ack(ack_id, true, 0, frag_list->count);
+        send_simple_ack(ids->ack_id, true, 0, frag_list->count);
         ESP_LOGI(TAG, "Successfully received %d fragments and sent ACK on 0x%X", 
-                 frag_list->count, ack_id);
+                 frag_list->count, ids->ack_id);
     } else {
         // Send NACK with error info
         uint8_t error_code = (ret == ESP_ERR_TIMEOUT) ? 1 : 2;
-        send_simple_ack(ack_id, false, error_code, 0);
+        send_simple_ack(ids->ack_id, false, error_code, 0);
         ESP_LOGE(TAG, "Failed to receive fragments (%s), sent NACK on 0x%X", 
-                 esp_err_to_name(ret), ack_id);
+                 esp_err_to_name(ret), ids->ack_id);
     }
     
     return ret;
 }
 
-
-/**
- * @brief Subscribe to a predefined set of CAN IDs
- * @param set Which subscription set to use
- * @return ESP_OK on success
- */
-esp_err_t can_subscribe_set(can_subscription_set_t set) {
-    const can_subscription_spec_t *specs;
-    size_t count;
-    
-    // Predefined subscription sets
-    static const can_subscription_spec_t manager_specs[] = {
-        {CAN_ID_MOTCTRL_RESP_START, 2},
-        {CAN_ID_MOTCTRL_RESP_DATA, 60},
-        {CAN_ID_MOTCTRL_RESP_END, 2},
-        {CAN_ID_MOTCTRL_RESP_ACK, 5}
-    };
-    
-    static const can_subscription_spec_t worker_specs[] = {
-        {CAN_ID_MOTCTRL_PKG_START, 2},
-        {CAN_ID_MOTCTRL_PKG_DATA, 60},
-        {CAN_ID_MOTCTRL_PKG_END, 2},
-        {CAN_ID_MOTCTRL_PKG_ACK, 5}
-    };
-    
-    switch (set) {
-        case CAN_SUBSCRIPTION_SET_MANAGER:
-            specs = manager_specs;
-            count = sizeof(manager_specs) / sizeof(manager_specs[0]);
-            ESP_LOGI("CAN_SUB_SET", "Subscribing to MANAGER response channels");
-            break;
-            
-        case CAN_SUBSCRIPTION_SET_WORKER:
-            specs = worker_specs;
-            count = sizeof(worker_specs) / sizeof(worker_specs[0]);
-            ESP_LOGI("CAN_SUB_SET", "Subscribing to WORKER package channels");
-            break;
-            
-        default:
-            ESP_LOGE("CAN_SUB_SET", "Invalid subscription set: %d", set);
-            return ESP_ERR_INVALID_ARG;
-    }
-    
-    return can_subscribe_multiple(specs, count);
-}
-
-/**
- * @brief Unsubscribe from a predefined set of CAN IDs
- * @param set Which subscription set to unsubscribe from
- * @return ESP_OK on success
- */
-esp_err_t can_unsubscribe_set(can_subscription_set_t set) {
-    const uint32_t *ids;
-    size_t count;
-    
-    static const uint32_t manager_ids[] = {
-        CAN_ID_MOTCTRL_RESP_START, CAN_ID_MOTCTRL_RESP_DATA,
-        CAN_ID_MOTCTRL_RESP_END, CAN_ID_MOTCTRL_RESP_ACK
-    };
-    
-    static const uint32_t worker_ids[] = {
-        CAN_ID_MOTCTRL_PKG_START, CAN_ID_MOTCTRL_PKG_DATA,
-        CAN_ID_MOTCTRL_PKG_END, CAN_ID_MOTCTRL_PKG_ACK
-    };
-    
-    switch (set) {
-        case CAN_SUBSCRIPTION_SET_MANAGER:
-            ids = manager_ids;
-            count = sizeof(manager_ids) / sizeof(manager_ids[0]);
-            ESP_LOGI("CAN_UNSUB_SET", "Unsubscribing from MANAGER channels");
-            break;
-            
-        case CAN_SUBSCRIPTION_SET_WORKER:
-            ids = worker_ids;
-            count = sizeof(worker_ids) / sizeof(worker_ids[0]);
-            ESP_LOGI("CAN_UNSUB_SET", "Unsubscribing from WORKER channels");
-            break;
-            
-        default:
-            ESP_LOGE("CAN_UNSUB_SET", "Invalid subscription set: %d", set);
-            return ESP_ERR_INVALID_ARG;
-    }
-    
-    return can_unsubscribe_multiple(ids, count);
-}

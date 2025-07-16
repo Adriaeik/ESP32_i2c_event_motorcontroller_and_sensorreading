@@ -8,7 +8,7 @@ static const char *TAG = "MOTCTRL_MANAGER";
 
 esp_err_t start_worker(const motorcontroller_pkg_t *pkg, uint32_t timeout_ms)
 {
-    esp_err_t ret = can_subscribe_set(CAN_SUBSCRIPTION_SET_MANAGER);
+    esp_err_t ret = can_subscribe_set(CAN_MTOTCTRL_MANAGER);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Manager failed to subscribe to response channels");
         return ret;
@@ -23,10 +23,7 @@ esp_err_t start_worker(const motorcontroller_pkg_t *pkg, uint32_t timeout_ms)
     }
     
     
-    ret = send_fragment_list_simple_ack(CAN_ID_MOTCTRL_PKG_START, 
-                                        CAN_ID_MOTCTRL_PKG_DATA, 
-                                        CAN_ID_MOTCTRL_PKG_END,
-                                        CAN_ID_MOTCTRL_PKG_ACK, 
+    ret = send_fragment_list_simple_ack(CAN_MTOTCTRL_MANAGER, 
                                         &pkg_frag_list,
                                         timeout_ms);
     
@@ -42,7 +39,7 @@ esp_err_t start_worker(const motorcontroller_pkg_t *pkg, uint32_t timeout_ms)
     
 cleanup:
     // Clean unsubscribe
-    can_unsubscribe_set(CAN_SUBSCRIPTION_SET_MANAGER);
+    can_unsubscribe_set(CAN_MTOTCTRL_MANAGER);
     return ret;
 }
 
@@ -53,15 +50,12 @@ esp_err_t wait_for_worker(motorcontroller_response_t *resp, uint32_t wait_offset
     
     // FIXED: Receive with correct ACK ID (0x108 - manager sends ACK here)
     can_fragment_list_t resp_frag_list = {0};
-    esp_err_t ret = receive_fragment_list_simple_ack(CAN_ID_MOTCTRL_RESP_START, 
-                                                     CAN_ID_MOTCTRL_RESP_DATA, 
-                                                     CAN_ID_MOTCTRL_RESP_END,
-                                                     CAN_ID_MOTCTRL_RESP_ACK,
+    esp_err_t ret = receive_fragment_list_simple_ack(CAN_MTOTCTRL_MANAGER,
                                                      &resp_frag_list,
                                                      timeout_ms);
     
     // Clean up subscriptions
-    can_unsubscribe_set(CAN_SUBSCRIPTION_SET_MANAGER); 
+    can_unsubscribe_set(CAN_MTOTCTRL_MANAGER); 
     
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to receive response fragments");
@@ -84,20 +78,7 @@ esp_err_t wait_for_worker(motorcontroller_response_t *resp, uint32_t wait_offset
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-void manager_task(void *arg)
-{
+void manager_task(void *arg){
     ESP_LOGI(TAG, "Manager task started");
     
     while (1) {

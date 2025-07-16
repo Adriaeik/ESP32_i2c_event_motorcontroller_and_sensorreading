@@ -9,10 +9,7 @@ static const char *TAG = "MOTCTRL_WORKER";
 esp_err_t receive_work_package(motorcontroller_pkg_t *pkg, uint32_t timeout_ms) {
     // FIXED: Receive with correct ACK ID (0x103 - worker sends ACK here)
     can_fragment_list_t pkg_frag_list = {0};
-    esp_err_t ret = receive_fragment_list_simple_ack(CAN_ID_MOTCTRL_PKG_START, 
-                                                     CAN_ID_MOTCTRL_PKG_DATA, 
-                                                     CAN_ID_MOTCTRL_PKG_END,
-                                                     CAN_ID_MOTCTRL_PKG_ACK,  // 0x103 - worker sends ACK here
+    esp_err_t ret = receive_fragment_list_simple_ack(CAN_MTOTCTRL_WORKER,
                                                      &pkg_frag_list,
                                                      timeout_ms);
     if (ret != ESP_OK) {
@@ -33,11 +30,7 @@ esp_err_t send_work_response(const motorcontroller_response_t *resp, uint32_t ti
         return ret;
     }
     
-    // FIXED: Send with correct ACK ID (0x108 - manager sends ACK here)
-    ret = send_fragment_list_simple_ack(CAN_ID_MOTCTRL_RESP_START, 
-                                        CAN_ID_MOTCTRL_RESP_DATA, 
-                                        CAN_ID_MOTCTRL_RESP_END,
-                                        CAN_ID_MOTCTRL_RESP_ACK,  // 0x108 - manager sends ACK here
+    ret = send_fragment_list_simple_ack(CAN_MTOTCTRL_WORKER, 
                                         &resp_frag_list,
                                         timeout_ms);
     
@@ -62,7 +55,7 @@ void worker_task(void *arg) {
     
     // Subscribe once at startup
     esp_err_t ret ;
-    if (can_subscribe_set(CAN_SUBSCRIPTION_SET_WORKER) != ESP_OK) {
+    if (can_subscribe_set(CAN_MTOTCTRL_WORKER) != ESP_OK) {
         ESP_LOGE(TAG, "Worker failed to subscribe to package channels, cannot function");
         return;
     }
