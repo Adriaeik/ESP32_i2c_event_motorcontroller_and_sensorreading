@@ -7,6 +7,11 @@
 
 void outputs_init(void);
 
+/**
+ * @brief Deinitialize output system (turn off all outputs, reset state)
+ */
+void outputs_deinit(void);
+
 void outputs_set_winch_down(bool enable);
 void outputs_set_winch_up(bool enable);
 void outputs_set_lamp(bool enable);

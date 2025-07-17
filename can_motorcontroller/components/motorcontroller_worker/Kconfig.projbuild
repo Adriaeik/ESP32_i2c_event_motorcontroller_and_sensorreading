@@ -122,7 +122,7 @@ menu "Aktuatorar (output)"
             
     config GPIO_WINCH_UP
         int "-X1:2 → GPIO for WINCH_UP"
-        default 16
+        default 25
         range 0 39
         help
             GPIO som skal koblast til reléet som styrer vinsjen i oppover retning.
@@ -130,7 +130,7 @@ menu "Aktuatorar (output)"
 
     config GPIO_WINCH_DOWN
         int "-X1:3 → GPIO for WINCH_DOWN"
-        default 17
+        default 26
         range 0 39
         help
             GPIO som skal koblast til reléet som styrer vinsjen i nedover retning.
@@ -138,7 +138,7 @@ menu "Aktuatorar (output)"
                     
     config GPIO_LAMP
         int "-X1:11 → GPIO for LAMP"
-        default 20
+        default 16
         range 0 39
         depends on USE_WINCH_RUNNING_LAMP
         help

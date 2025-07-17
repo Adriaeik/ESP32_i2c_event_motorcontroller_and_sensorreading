@@ -7,7 +7,21 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 
-void inputs_init(void);
+typedef enum {
+    HOME,
+    AUTO,
+    TENTION,
+    TIMEOUT
+} InputEventType;
+
+typedef struct {
+    InputEventType event_type;
+    bool state;
+    bool edge_detected;
+} InputEvent;
+
+void inputs_init(QueueHandle_t queue);
+void inputs_deinit(void);
 
 // Basic input state getters - only 3 inputs now
 bool inputs_get_winch_home(void);
@@ -19,7 +33,6 @@ bool inputs_home_edge_detected(void);
 bool inputs_tension_edge_detected(void);
 
 // Controller integration functions
-void inputs_set_controller_queue(QueueHandle_t queue);
 const char* inputs_get_name(uint8_t index);
 
 #endif // INPUTS_H

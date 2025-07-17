@@ -39,7 +39,7 @@ static ManagerContext s_manager_ctx = {0};
 static void motorcontroller_manager_task(void *arg);
 
 esp_err_t load_system_motorcontroller_pkg(motorcontroller_pkg_t *pkg, state_t target_state) {
-    ESP_LOGI(TAG, "Loading system motorcontroller package for state: %s", get_state_string(target_state));
+    ESP_LOGI(TAG, "Loading system motorcontroller package for state: %s", state_to_string(target_state));
     
     esp_err_t result = load_or_init_motorcontroller_pkg(pkg, target_state);
     

@@ -13,66 +13,31 @@ esp_err_t motorcontroller_worker_init_hardware(void) {
     ESP_LOGI(TAG, "Initializing worker hardware");
     
     outputs_init();
-    inputs_init();
+    // inputs_init(NULL);
     
     ESP_LOGI(TAG, "Worker hardware initialized successfully");
     return ESP_OK;
 }
 
+
 esp_err_t do_work(const motorcontroller_pkg_t *pkg, motorcontroller_response_t *resp) {
     ESP_LOGI(TAG, "Starting work - State: %s, End depth: %d cm", 
-             get_state_string(pkg->STATE), pkg->end_depth);
+             state_to_string(pkg->STATE), pkg->end_depth);
     
-    // Initialize response
-    motorcontroller_response_init_default(resp);
+    esp_err_t result = winch_controller_init();     // Safe multiple calls
+    if (result != ESP_OK) return result;
+
+    memset(resp, 0, sizeof(motorcontroller_response_t));
     resp->STATE = pkg->STATE;
     
-    // Check safety conditions first
-    if (!inputs_get_winch_auto()) {
-        ESP_LOGE(TAG, "AUTO mode not enabled - cannot execute work");
-        resp->result = ESP_ERR_INVALID_STATE;
-        return ESP_ERR_INVALID_STATE;
+    result = winch_execute_operation(pkg, resp);
+    if (result != ESP_OK) {
+        winch_controller_deinit();                  // Cleanup on error
+        return result;
     }
     
-    if (inputs_get_winch_tension()) {
-        ESP_LOGE(TAG, "Tension alarm active - cannot execute work");
-        resp->result = ESP_ERR_INVALID_STATE;
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    esp_err_t result = ESP_OK;
-    uint32_t start_time = esp_timer_get_time() / 1000; // ms
-    
-    // Execute based on state
-    switch (pkg->STATE) {
-        case INIT:
-            ESP_LOGI(TAG, "Executing INIT - going to home position");
-            result = winch_go_to_home_position();
-            resp->working_time = (esp_timer_get_time() / 1000 - start_time) / 1000; // seconds
-            resp->estimated_cm_per_s = pkg->prev_estimated_cm_per_s; // No change for INIT
-            break;
-            
-        case LOWERING:
-        case RISING:
-            ESP_LOGI(TAG, "Executing %s operation", get_state_string(pkg->STATE));
-            result = winch_execute_operation(pkg, resp);
-            break;
-            
-        default:
-            ESP_LOGE(TAG, "Invalid state: %d", pkg->STATE);
-            result = ESP_ERR_INVALID_ARG;
-            break;
-    }
-    
-    resp->result = result;
-    
-    if (result == ESP_OK) {
-        ESP_LOGI(TAG, "Work completed successfully - Time: %ds, Speed: %d cm/s", 
-                 resp->working_time, resp->estimated_cm_per_s);
-    } else {
-        ESP_LOGE(TAG, "Work failed: %s", esp_err_to_name(result));
-    }
-    
+    result = winch_controller_deinit();             // Cleanup after success
+    ESP_LOGI(TAG, "Ferdig");
     return result;
 }
 

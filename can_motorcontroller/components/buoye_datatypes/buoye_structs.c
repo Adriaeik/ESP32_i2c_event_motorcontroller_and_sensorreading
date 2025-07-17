@@ -118,30 +118,43 @@ sheared_status_t sheared_status_default(void) {
     return status;
 }
 
-void motorcontroller_pkg_init_default(motorcontroller_pkg_t *pkg) {
+void motorcontroller_pkg_init_default(motorcontroller_pkg_t *pkg)
+{
+    if (pkg == NULL) {
+        return;
+    }
+    
+    memset(pkg, 0, sizeof(motorcontroller_pkg_t));
+    
     pkg->STATE = LOWERING;
-    pkg->prev_working_time = 120;
-    pkg->rising_timeout_percent = 130;
+    pkg->prev_working_time = 0;
+    pkg->rising_timeout_percent = 10;
     pkg->prev_reported_depth = 0;
-    pkg->prev_end_depth = 500;
-    pkg->prev_estimated_cm_per_s = 1000; // = 10.00 cm/s
+    pkg->prev_end_depth = 0;
+    pkg->prev_estimated_cm_per_s = 50;  // Default 50 cm/s
     pkg->poll_type = STATIC_DEPTH;
-    pkg->end_depth = 800;
-    for (int i = 0; i < MAX_POINTS; i++) pkg->static_points[i] = 0;
-    pkg->static_points[0] = 100;
-    pkg->static_points[1] = 200;
-    pkg->static_points[2] = 400;
-    pkg->samples = 5;
-    pkg->static_poll_interval_s = 10;
-    pkg->alpha = 0.8;
-    pkg->beta = 0.02;
+    pkg->end_depth = 0;
+    pkg->samples = 1;
+    pkg->static_poll_interval_s = 5;
+    pkg->alpha = 0.1;
+    pkg->beta = 0.05;
+    
+    // Initialize static points array (null-terminated)
+    memset(pkg->static_points, 0, sizeof(pkg->static_points));
 }
 
-void motorcontroller_response_init_default(motorcontroller_response_t *resp) {
+void motorcontroller_response_init_default(motorcontroller_response_t *resp)
+{
+    if (resp == NULL) {
+        return;
+    }
+    
+    memset(resp, 0, sizeof(motorcontroller_response_t));
+    
     resp->STATE = LOWERING;
     resp->result = ESP_OK;
-    resp->working_time = 130;
-    resp->estimated_cm_per_s = 1050; // = 10.50 cm/s
+    resp->working_time = 0;
+    resp->estimated_cm_per_s = 50;  // Default estimate
 }
 
 

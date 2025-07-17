@@ -10,44 +10,6 @@
 
 static const char *TAG = "can_motctrl_common";
 
-void motorcontroller_pkg_init_default(motorcontroller_pkg_t *pkg)
-{
-    if (pkg == NULL) {
-        return;
-    }
-    
-    memset(pkg, 0, sizeof(motorcontroller_pkg_t));
-    
-    pkg->STATE = LOWERING;
-    pkg->prev_working_time = 0;
-    pkg->rising_timeout_percent = 10;
-    pkg->prev_reported_depth = 0;
-    pkg->prev_end_depth = 0;
-    pkg->prev_estimated_cm_per_s = 50;  // Default 50 cm/s
-    pkg->poll_type = STATIC_DEPTH;
-    pkg->end_depth = 0;
-    pkg->samples = 1;
-    pkg->static_poll_interval_s = 5;
-    pkg->alpha = 0.1;
-    pkg->beta = 0.05;
-    
-    // Initialize static points array (null-terminated)
-    memset(pkg->static_points, 0, sizeof(pkg->static_points));
-}
-
-void motorcontroller_response_init_default(motorcontroller_response_t *resp)
-{
-    if (resp == NULL) {
-        return;
-    }
-    
-    memset(resp, 0, sizeof(motorcontroller_response_t));
-    
-    resp->STATE = LOWERING;
-    resp->result = ESP_OK;
-    resp->working_time = 0;
-    resp->estimated_cm_per_s = 50;  // Default estimate
-}
 
 int calculate_operation_timeout(state_t state, 
                                uint16_t prev_estimated_cm_per_s,
@@ -98,20 +60,12 @@ int calculate_operation_timeout(state_t state,
     }
     
     ESP_LOGD("timeout_calc", "Calculated timeout: %ds (movement:%ds, static:%ds, state:%s)", 
-             base_timeout, movement_time, static_time, get_state_string(state));
+             base_timeout, movement_time, static_time, state_to_string(state));
     
     return base_timeout;
 }
 
-const char* get_state_string(state_t state)
-{
-    switch (state) {
-        case INIT:      return "INIT";
-        case LOWERING:  return "LOWERING";
-        case RISING:    return "RISING";
-        default:        return "UNKNOWN";
-    }
-}
+
 
 const char* get_worker_status_string(worker_status_t status)
 {
@@ -215,7 +169,7 @@ void print_motorcontroller_pkg_info(const motorcontroller_pkg_t *pkg, const char
     }
     
     ESP_LOGI(tag, "=== Motor Controller Package ===");
-    ESP_LOGI(tag, "  State: %s", get_state_string(pkg->STATE));
+    ESP_LOGI(tag, "  State: %s", state_to_string(pkg->STATE));
     ESP_LOGI(tag, "  End Depth: %d cm", pkg->end_depth);
     ESP_LOGI(tag, "  Previous Depth: %d cm", pkg->prev_reported_depth);
     ESP_LOGI(tag, "  Poll Type: %s", pkg->poll_type == STATIC_DEPTH ? "STATIC" : "ALPHA_DEPTH");
@@ -256,7 +210,7 @@ void print_motorcontroller_response_info(const motorcontroller_response_t *resp,
     }
     
     ESP_LOGI(tag, "=== Motor Controller Response ===");
-    ESP_LOGI(tag, "  State: %s", get_state_string(resp->STATE));
+    ESP_LOGI(tag, "  State: %s", state_to_string(resp->STATE));
     ESP_LOGI(tag, "  Result: %s (%d)", esp_err_to_name(resp->result), resp->result);
     ESP_LOGI(tag, "  Working Time: %d seconds", resp->working_time);
     ESP_LOGI(tag, "  Estimated Speed: %d cm/s", resp->estimated_cm_per_s);

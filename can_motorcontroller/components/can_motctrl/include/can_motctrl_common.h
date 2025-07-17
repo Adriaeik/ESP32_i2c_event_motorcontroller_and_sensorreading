@@ -78,18 +78,6 @@ typedef enum {
 // Common utility functions
 
 /**
- * @brief Initialize motor controller package with default values
- * @param pkg Package to initialize
- */
-void motorcontroller_pkg_init_default(motorcontroller_pkg_t *pkg);
-
-/**
- * @brief Initialize motor controller response with default values  
- * @param resp Response to initialize
- */
-void motorcontroller_response_init_default(motorcontroller_response_t *resp);
-
-/**
  * @brief Calculate appropriate timeout based on operation parameters
  * @param state Operation state (LOWERING/RISING)
  * @param prev_estimated_cm_per_s Previous speed estimate
@@ -113,7 +101,7 @@ int calculate_operation_timeout(state_t state,
  * @param state State to convert
  * @return String representation
  */
-const char* get_state_string(state_t state);
+const char* state_to_string(state_t state);
 
 /**
  * @brief Get string representation of worker status

@@ -46,7 +46,12 @@
     "future": "c",
     "event_groups.h": "c",
     "motorcontroller_worker.h": "c",
-    "chrono": "c"
+    "chrono": "c",
+    "winch_controller.h": "c",
+    "motorcontroller_manager.h": "c",
+    "regex": "c",
+    "outputs.h": "c",
+    "inputs.h": "c"
   },
   "idf.flashType": "UART",
   "idf.portWin": "COM15"
