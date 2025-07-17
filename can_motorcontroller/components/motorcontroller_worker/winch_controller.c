@@ -5,7 +5,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
-#include "freertos/event_groups.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include <string.h>
@@ -50,11 +49,12 @@ typedef enum {
 // Operation state tracking
 typedef struct {
     // Timers
-    w_timer_t operation_timer;              // Total operation time
-    w_timer_t working_timer;                // Active motor time only
-    w_timer_t static_wait_timer;            // Static polling wait time
-    w_timer_t recovery_timer;               // Recovery operation timer
-    
+    w_timer_t operation_timer;              // Total run time
+
+    uint32_t total_recovery_time_ms;        // Time spent in recovery (exclude from working time)
+    uint32_t total_static_wait_time_ms;     // Time spent in static waits (exclude from working time)
+    int working_time;                       // = operation_timer - total_recovery_time_ms - total_static_wait_time_ms;
+
     // Operation parameters
     const motorcontroller_pkg_t *current_pkg;
     motorcontroller_response_t *current_resp;
@@ -67,8 +67,6 @@ typedef struct {
     
     // Error handling and recovery
     uint8_t recovery_attempts;
-    uint32_t total_recovery_time_ms;        // Time spent in recovery (exclude from working time)
-    uint32_t total_static_wait_time_ms;     // Time spent in static waits (exclude from working time)
     
     // State management
     winch_direction_t current_direction;
@@ -77,7 +75,6 @@ typedef struct {
     
     // Event handling
     QueueHandle_t event_queue;
-    EventGroupHandle_t event_group;
 } winch_operation_state_t;
 
 // Private state - only one operation at a time
@@ -91,12 +88,13 @@ static InputEventExt wait_until_notified_or_time(TickType_t start_tick, uint32_t
 static esp_err_t check_initial_input_state(void);
 static esp_err_t execute_operation_internal(const motorcontroller_pkg_t *pkg, motorcontroller_response_t *resp);
 static void update_speed_estimate_pre_operation(const motorcontroller_pkg_t *pkg);
+static esp_err_t handle_time_based_operation(state_t state, uint32_t operation_time_ms, uint32_t timeout_ms, const char* mode_name);
 static esp_err_t handle_static_depth_mode(state_t state);
 static esp_err_t handle_alpha_depth_mode(state_t state);
 static esp_err_t handle_lin_time_mode(state_t state);
-static esp_err_t wait_for_operation_complete(state_t STATE, uint32_t timeout_ms);
-static esp_err_t perform_recovery_sequence(void);
-static esp_err_t handle_tension_recovery(winch_direction_t original_direction);
+static esp_err_t await_completion_and_handle_events(state_t STATE, uint32_t timeout_ms);
+static esp_err_t rising_timeout_recovery_sequence(void);
+static esp_err_t handle_tension_recovery(state_t state);
 static void winch_move(winch_direction_t direction);
 static void reset_operation_state(void);
 static bool validate_package(const motorcontroller_pkg_t *pkg);
@@ -126,10 +124,9 @@ esp_err_t winch_controller_init(void) {
     g_monitor_task_should_exit = false;
     // Create event queue and group
     g_op_state.event_queue = xQueueCreate(10, sizeof(InputEvent));  // Minst 10 elementer
-    // g_op_state.event_group = xEventGroupCreate();
     
-    if (!g_op_state.event_queue || !g_op_state.event_group) {
-        ESP_LOGE(TAG, "Failed to create event structures");
+    if (!g_op_state.event_queue ) {
+        ESP_LOGE(TAG, "Failed to create event queue");
         return ESP_ERR_NO_MEM;
     }
     inputs_init(g_op_state.event_queue);
@@ -185,12 +182,6 @@ esp_err_t winch_controller_deinit(void) {
         g_op_state.event_queue = NULL;
     }
     
-    if (g_op_state.event_group) {
-        vEventGroupDelete(g_op_state.event_group);
-        g_op_state.event_group = NULL;
-    }
-    
-    
     // Deinitialize inputs and outputs systems
     inputs_deinit();
     outputs_deinit();
@@ -235,15 +226,7 @@ esp_err_t winch_go_to_home_position(void) {
     ESP_LOGI(TAG, "Going to home position");
     
     // Safety checks
-    if (!inputs_get_winch_auto()) {
-        ESP_LOGE(TAG, "AUTO mode not enabled");
-        return ESP_ERR_INVALID_STATE;
-    }
-    
-    if (inputs_get_winch_tension()) {
-        ESP_LOGE(TAG, "Tension alarm active");
-        return ESP_ERR_INVALID_STATE;
-    }
+    if(check_initial_input_state() != ESP_OK) return ESP_ERR_INVALID_STATE;
     
     // Check if already at home
     if (inputs_get_winch_home()) {
@@ -254,23 +237,21 @@ esp_err_t winch_go_to_home_position(void) {
     // Reset state and start operation
     reset_operation_state();
     g_op_state.operation_active = true;
-    timer_start(&g_op_state.operation_timer);
-    timer_start(&g_op_state.working_timer);
-    
-    // Start moving up
-    winch_move(WINCH_UP);
+    timer_start(&g_op_state.operation_timer);   
     
     // Wait for home with timeout (use default rising timeout)
+    winch_move(WINCH_DOWN); // incase we are above the sensor
+    esp_err_t result = await_completion_and_handle_events(LOWERING, RECOVERY_DOWN_TIME_MS);
     uint32_t timeout_ms = 30000; // 30 second default timeout
-    esp_err_t result = wait_for_operation_complete(RISING, timeout_ms);
-    
+    winch_move(WINCH_UP);
+    result = await_completion_and_handle_events(RISING, timeout_ms);
     // Stop motor
     winch_move(WINCH_STOP);
     g_op_state.operation_active = false;
-    
+    g_op_state.working_time = timer_ms_since_start(&g_op_state.operation_timer) - g_op_state.total_recovery_time_ms - g_op_state.total_static_wait_time_ms;
     if (result == ESP_OK) {
         char time_str[32];
-        get_elapsed_time_string(timer_ms_since_start(&g_op_state.working_timer), time_str, sizeof(time_str));
+        get_elapsed_time_string(g_op_state.working_time, time_str, sizeof(time_str));
         ESP_LOGI(TAG, "Home position reached in %s", time_str);
     } else {
         ESP_LOGE(TAG, "Failed to reach home position: %s", esp_err_to_name(result));
@@ -282,44 +263,9 @@ esp_err_t winch_go_to_home_position(void) {
 // ============================================================================
 // PRIVATE IMPLEMENTATION
 // ============================================================================
-
-static InputEventExt wait_until_notified_or_time(TickType_t start_tick, uint32_t wait_time_ms) {
-    TickType_t elapsed_ticks = xTaskGetTickCount() - start_tick;
-    TickType_t total_wait_ticks = pdMS_TO_TICKS(wait_time_ms);
-    
-    InputEvent received_event = {
-        .event_type = TIMEOUT,
-        .state = true,
-        .edge_detected = false
-    };
-    
-    if (elapsed_ticks >= total_wait_ticks) {
-        goto end;
-    }
-    
-    TickType_t remaining_ticks = total_wait_ticks - elapsed_ticks;
-    xQueueReceive(g_op_state.event_queue, &received_event, remaining_ticks);
-
-end:
-    return (InputEventExt){
-        .event = received_event,
-        .remaining_events = uxQueueMessagesWaiting(g_op_state.event_queue)
-    };
-}
-static esp_err_t check_initial_input_state(void){
-    // Safety checks
-    if (!inputs_get_winch_auto()) {
-        ESP_LOGE(TAG, "AUTO mode not enabled");
-        return ESP_ERR_INVALID_STATE;
-    } 
-    if (inputs_get_winch_tension()) {
-        ESP_LOGE(TAG, "Tension alarm active");
-    }
-}
-
 static esp_err_t execute_operation_internal(const motorcontroller_pkg_t *pkg, motorcontroller_response_t *resp) {
     
-    esp_err_t result = check_initial_inputstate();
+    esp_err_t result = check_initial_input_state();
     if (result != ESP_OK){
         resp->result = result;
         resp->working_time = 0;
@@ -341,7 +287,6 @@ static esp_err_t execute_operation_internal(const motorcontroller_pkg_t *pkg, mo
     
     // Start operation timing
     timer_start(&g_op_state.operation_timer);
-    timer_start(&g_op_state.working_timer);
     g_op_state.operation_active = true;
     
     
@@ -386,7 +331,7 @@ static esp_err_t execute_operation_internal(const motorcontroller_pkg_t *pkg, mo
     g_op_state.operation_active = false;
     
     // Calculate final working time (exclude recovery and static waits)
-    uint32_t total_time_ms = timer_ms_since_start(&g_op_state.working_timer);
+    uint32_t total_time_ms = timer_ms_since_start(&g_op_state.operation_timer);
     uint32_t working_time_ms = total_time_ms - g_op_state.total_recovery_time_ms - g_op_state.total_static_wait_time_ms;
     
     // Fill response
@@ -397,7 +342,44 @@ static esp_err_t execute_operation_internal(const motorcontroller_pkg_t *pkg, mo
     ESP_LOGI(TAG, "Operation complete - Result: %s, Working time: %ds, Speed: %.0f cm/s", 
              esp_err_to_name(result), resp->working_time, (double)resp->estimated_cm_per_s / 1000.0);
     
+
     return result;
+}
+
+static InputEventExt wait_until_notified_or_time(TickType_t start_tick, uint32_t wait_time_ms) {
+    TickType_t elapsed_ticks = xTaskGetTickCount() - start_tick;
+    TickType_t total_wait_ticks = pdMS_TO_TICKS(wait_time_ms);
+    
+    InputEvent received_event = {
+        .event_type = TIMEOUT,
+        .state = true,
+        .edge_detected = false
+    };
+    
+    if (elapsed_ticks >= total_wait_ticks) {
+        goto end;
+    }
+    
+    TickType_t remaining_ticks = total_wait_ticks - elapsed_ticks;
+    xQueueReceive(g_op_state.event_queue, &received_event, remaining_ticks);
+
+end:
+    return (InputEventExt){
+        .event = received_event,
+        .remaining_events = uxQueueMessagesWaiting(g_op_state.event_queue)
+    };
+}
+static esp_err_t check_initial_input_state(void){
+    // Safety checks
+    if (!inputs_get_winch_auto()) {
+        ESP_LOGE(TAG, "AUTO mode not enabled");
+        return ESP_ERR_INVALID_STATE;
+    } 
+    if (inputs_get_winch_tension()) {
+        ESP_LOGE(TAG, "Tension alarm active");
+        return ESP_ERR_INVALID_STATE;
+    }
+    return ESP_OK;
 }
 
 static void update_speed_estimate_pre_operation(const motorcontroller_pkg_t *pkg) {
@@ -440,122 +422,64 @@ static void update_speed_estimate_pre_operation(const motorcontroller_pkg_t *pkg
     }
 }
 
-static esp_err_t handle_alpha_depth_mode(state_t state) {
-    const motorcontroller_pkg_t *pkg = g_op_state.current_pkg;
-    bool is_rising = (state == RISING);
-    
-    // Calculate expected time based on distance and speed
-    uint32_t expected_time_ms = calculate_expected_time_ms(pkg->end_depth, g_op_state.updated_speed_estimate, 
-                                                          pkg->poll_type, pkg->samples, pkg->static_poll_interval_s);
-    
-    // Apply timeout safety margin
-    uint32_t timeout_ms;
-    if (is_rising) {
-        timeout_ms = (expected_time_ms * (100 + pkg->rising_timeout_percent)) / 100;
-    } else {
-        timeout_ms = (expected_time_ms * (100 + WINCH_TIMEOUT_SAFETY_MARGIN_PERCENT)) / 100;
-    }
-    
+static esp_err_t handle_time_based_operation(state_t state, uint32_t operation_time_ms, uint32_t timeout_ms, const char* mode_name) {
     char time_str[32];
-    char timeout_str[32];
-    get_elapsed_time_string(expected_time_ms, time_str, sizeof(time_str));
-    get_elapsed_time_string(timeout_ms, timeout_str, sizeof(timeout_str));
-    ESP_LOGI(TAG, "ALPHA_DEPTH mode: Expected %s, Timeout %s, Distance %d cm", 
-             time_str, timeout_str, pkg->end_depth);
+    get_elapsed_time_string(operation_time_ms, time_str, sizeof(time_str));
+    ESP_LOGI(TAG, "%s mode: Operating for %s", mode_name, time_str);
     
     // Start movement
-    winch_direction_t direction = is_rising ? WINCH_UP : WINCH_DOWN;
+    winch_direction_t direction = (state == RISING) ? WINCH_UP : WINCH_DOWN;
     winch_move(direction);
     
     esp_err_t result = ESP_OK;
     
-    if (is_rising) {
-        // RISING: Wait for home sensor or timeout
-        result = wait_for_operation_complete(state, timeout_ms);
-        if (result == ESP_ERR_TIMEOUT) {
-            ESP_LOGW(TAG, "ALPHA_DEPTH timeout - attempting recovery");
-            result = perform_recovery_sequence();
-        }
-    } else {
-        // LOWERING: Just run for the calculated time
-        w_timer_t operation_timer;
-        timer_start(&operation_timer);
-        
-        while (timer_ms_since_start(&operation_timer) < expected_time_ms) {
-            // Check for error conditions
-            if (!inputs_get_winch_auto()) {
-                ESP_LOGW(TAG, "AUTO mode disabled during lowering");
-                result = ESP_ERR_INVALID_STATE;
-                break;
+    switch (state) {
+        case RISING: 
+            // RISING: Wait for home sensor or timeout
+            result = await_completion_and_handle_events(state, timeout_ms);
+            if (result == ESP_ERR_TIMEOUT) {
+                while (rising_timeout_recovery_sequence() != ESP_ERR_TIMEOUT) break; 
             }
+            break;
             
-            if (inputs_get_winch_tension()) {
-                ESP_LOGW(TAG, "Tension detected during lowering - attempting recovery");
-                result = handle_tension_recovery(direction);
-                if (result != ESP_OK) {
-                    break;
-                }
+        case LOWERING: 
+            // LOWERING: Just run for the calculated time            
+            result = await_completion_and_handle_events(state, operation_time_ms);
+            if (result == ESP_OK) {
+                ESP_LOGI(TAG, "%s lowering completed after %s", mode_name, time_str);
             }
-            
-            vTaskDelay(pdMS_TO_TICKS(50)); // Check every 50ms
-        }
-        
-        if (result == ESP_OK) {
-            ESP_LOGI(TAG, "ALPHA_DEPTH lowering completed after %s", time_str);
-        }
+            break;
+
+        default:
+            break;
     }
-    
+
+    winch_move(WINCH_STOP); 
     return result;
+}
+
+static esp_err_t handle_alpha_depth_mode(state_t state) {
+    const motorcontroller_pkg_t *pkg = g_op_state.current_pkg;
+    
+    // Calculate expected time based on distance and speed
+    uint32_t expected_time_ms = calculate_expected_time_ms(pkg->end_depth, g_op_state.updated_speed_estimate, 
+                                                          pkg->poll_type, pkg->samples, pkg->static_poll_interval_s);
+    // Apply timeout safety margin
+    uint32_t timeout_ms = (expected_time_ms * (100 + pkg->rising_timeout_percent)) / 100;
+    
+    ESP_LOGI(TAG, "ALPHA_DEPTH mode: Expected time, Distance %d cm", pkg->end_depth);
+    
+    return handle_time_based_operation(state, expected_time_ms, timeout_ms, "ALPHA_DEPTH");
 }
 
 static esp_err_t handle_lin_time_mode(state_t state) {
     const motorcontroller_pkg_t *pkg = g_op_state.current_pkg;
-    bool is_rising = (state == RISING);
     
     // Use static_poll_interval_s as the operation time
     uint32_t operation_time_ms = pkg->static_poll_interval_s * 1000;
-    uint32_t timeout_ms = (operation_time_ms * (100 + WINCH_TIMEOUT_SAFETY_MARGIN_PERCENT)) / 100;
+    uint32_t timeout_ms = operation_time_ms; // Same timeout as operation time for LIN_TIME
     
-    char op_time_str[32];
-    char timeout_str[32];
-    get_elapsed_time_string(operation_time_ms, op_time_str, sizeof(op_time_str));
-    get_elapsed_time_string(timeout_ms, timeout_str, sizeof(timeout_str));
-    ESP_LOGI(TAG, "LIN_TIME mode: Operating for %s, Timeout %s", op_time_str, timeout_str);
-    
-    // Start movement
-    winch_direction_t direction = is_rising ? WINCH_UP : WINCH_DOWN;
-    winch_move(direction);
-    
-    // Wait for specified time or early completion
-    w_timer_t lin_timer;
-    timer_start(&lin_timer);
-    
-    while (timer_ms_since_start(&lin_timer) < operation_time_ms) {
-        // Check for early completion conditions (rising only)
-        if (is_rising && inputs_get_winch_home()) {
-            ESP_LOGI(TAG, "LIN_TIME: Home reached early");
-            return ESP_OK;
-        }
-        
-        // Check for errors
-        if (!inputs_get_winch_auto()) {
-            ESP_LOGW(TAG, "LIN_TIME: AUTO mode disabled");
-            return ESP_ERR_INVALID_STATE;
-        }
-        
-        if (inputs_get_winch_tension()) {
-            ESP_LOGW(TAG, "LIN_TIME: Tension detected - attempting recovery");
-            esp_err_t recovery_result = handle_tension_recovery(direction);
-            if (recovery_result != ESP_OK) {
-                return recovery_result;
-            }
-        }
-        
-        vTaskDelay(pdMS_TO_TICKS(50)); // Check every 50ms
-    }
-    
-    ESP_LOGI(TAG, "LIN_TIME: Time completed");
-    return ESP_OK;
+    return handle_time_based_operation(state, operation_time_ms, timeout_ms, "LIN_TIME");
 }
 
 static esp_err_t handle_static_depth_mode(state_t state) {
@@ -603,38 +527,14 @@ static esp_err_t handle_static_depth_mode(state_t state) {
         winch_direction_t direction = is_rising ? WINCH_UP : WINCH_DOWN;
         winch_move(direction);
         
-        // Wait for point to be reached (time-based estimate)
-        w_timer_t point_timer;
-        timer_start(&point_timer);
-        
-        while (timer_ms_since_start(&point_timer) < travel_time_ms) {
-            // Check for early home detection (rising only)
-            if (is_rising && inputs_get_winch_home()) {
-                ESP_LOGI(TAG, "STATIC_DEPTH: Home reached early during travel to point %d", i + 1);
-                return ESP_OK;
-            }
-            
-            // Check for errors
-            if (!inputs_get_winch_auto()) {
-                ESP_LOGW(TAG, "STATIC_DEPTH: AUTO disabled at point %d", i + 1);
-                return ESP_ERR_INVALID_STATE;
-            }
-            
-            if (inputs_get_winch_tension()) {
-                ESP_LOGW(TAG, "STATIC_DEPTH: Tension detected at point %d - attempting recovery", i + 1);
-                esp_err_t recovery_result = handle_tension_recovery(direction);
-                if (recovery_result != ESP_OK) {
-                    return recovery_result;
-                }
-                // Resume movement after recovery
-                winch_move(direction);
-            }
-            
-            vTaskDelay(pdMS_TO_TICKS(50));
-        }
-        
+        esp_err_t result = await_completion_and_handle_events(state, travel_time_ms);
+  
         // Stop at this point
         winch_move(WINCH_STOP);
+        if (result != ESP_OK && result != ESP_ERR_TIMEOUT) {
+            return result;  // Error occurred (AUTO disabled, etc.)
+        }
+        
         ESP_LOGI(TAG, "Reached point %d, starting static wait", i + 1);
         
         // Static wait period: static_poll_interval_s * samples + OFFSET
@@ -650,9 +550,37 @@ static esp_err_t handle_static_depth_mode(state_t state) {
         timer_start(&wait_timer);
         g_op_state.in_static_wait = true;
         
-        // Wait for static period
-        vTaskDelay(pdMS_TO_TICKS(static_wait_ms));
+        // Event-driven static wait - monitor for HOME (if rising) and AUTO disable
+        TickType_t wait_start = xTaskGetTickCount();
+        while (1) {
+            InputEventExt result = wait_until_notified_or_time(wait_start, static_wait_ms);
+            
+            switch (result.event.event_type) {
+                case HOME:
+                    if (result.event.state && is_rising) {
+                        ESP_LOGI(TAG, "Home reached during static wait at point %d - operation complete", i + 1);
+                        g_op_state.total_static_wait_time_ms += timer_ms_since_start(&wait_timer);
+                        g_op_state.in_static_wait = false;
+                        return ESP_OK;  // Early completion
+                    }
+                    break;
+                case AUTO:
+                    if (!result.event.state) {
+                        ESP_LOGW(TAG, "AUTO disabled during static wait at point %d", i + 1);
+                        g_op_state.total_static_wait_time_ms += timer_ms_since_start(&wait_timer);
+                        g_op_state.in_static_wait = false;
+                        return ESP_ERR_INVALID_STATE;
+                    }
+                    
+                case TIMEOUT:
+                    goto wait_complete;  // Static wait finished normally
+                
+                default:
+                    break;  // Ignore other events during static wait
+            }
+        }
         
+wait_complete:
         // Update exclusion time
         g_op_state.total_static_wait_time_ms += timer_ms_since_start(&wait_timer);
         g_op_state.in_static_wait = false;
@@ -667,96 +595,164 @@ static esp_err_t handle_static_depth_mode(state_t state) {
     if (is_rising) {
         ESP_LOGI(TAG, "STATIC_DEPTH rising: Moving to home after static points");
         winch_move(WINCH_UP);
-        uint32_t timeout_ms = 10000;
-        return wait_for_operation_complete(state, timeout_ms ); // 10 second timeout to reach home
+        
+        // Calculate timeout based on distance from last point to surface plus buffer
+        uint32_t distance_to_home = pkg->static_points[num_points-1]; // Distance from last point to surface
+        uint32_t timeout_ms = calculate_expected_time_ms(distance_to_home, g_op_state.updated_speed_estimate, 
+                                                        ALPHA_DEPTH, 0, 0) + 5000; // 5 second buffer
+        
+        return await_completion_and_handle_events(state, timeout_ms);
     }
     
     return ESP_OK;
 }
 
-static esp_err_t wait_for_operation_complete(state_t STATE, uint32_t timeout_ms) {
-    // This function is specifically for RISING operations waiting for home sensor
-    w_timer_t timeout_timer;
-    timer_start(&timeout_timer);
+static esp_err_t await_completion_and_handle_events(state_t STATE, uint32_t timeout_ms) {
+    TickType_t start_tick = xTaskGetTickCount();
     
-    while (timer_ms_since_start(&timeout_timer) < timeout_ms) {
-        // Check for completion conditions (home sensor)
-        if (g_op_state.current_direction == WINCH_UP && inputs_get_winch_home()) {
-            ESP_LOGI(TAG, "Home position reached");
-            return ESP_OK;
-        }
+    ESP_LOGI(TAG, "Waiting for operation complete , timeout: %d ms", timeout_ms);
+    
+    while (1) {
+        InputEventExt result = wait_until_notified_or_time(start_tick, timeout_ms);
         
-        // Check for error conditions
-        if (!inputs_get_winch_auto()) {
-            ESP_LOGW(TAG, "AUTO mode disabled during operation");
-            return ESP_ERR_INVALID_STATE;
+        switch (result.event.event_type) {
+            case HOME:
+                if (result.event.state && ((STATE == RISING) || (STATE == INIT))) {
+                    ESP_LOGI(TAG, "Home position reached");
+                    return ESP_OK;
+                }
+                break;
+                
+            case AUTO:
+                if (!result.event.state) {
+                    ESP_LOGW(TAG, "AUTO mode disabled during operation");
+                    winch_move(WINCH_STOP);
+                    return ESP_ERR_INVALID_STATE;
+                }
+                break;
+                
+            case TENTION:
+                if (result.event.state) {
+                    ESP_LOGW(TAG, "Tension alarm - attempting recovery");
+                    esp_err_t recovery_result = handle_tension_recovery(STATE);
+                    if (recovery_result != ESP_OK) {
+                        winch_move(WINCH_STOP); 
+                        return recovery_result;
+                    }
+                }
+                break;
+                
+            case TIMEOUT:
+                if (STATE == LOWERING) return ESP_OK;
+                // else its a timeout on rising
+                ESP_LOGW(TAG, "Operation timeout");
+                return ESP_ERR_TIMEOUT;
+            default: return ESP_ERR_INVALID_STATE;
         }
-        
-        if (inputs_get_winch_tension()) {
-            ESP_LOGW(TAG, "Tension alarm during rising - attempting recovery");
-            esp_err_t recovery_result = handle_tension_recovery(WINCH_UP);
-            if (recovery_result != ESP_OK) {
-                return recovery_result;
-            }
-            // Resume upward movement after recovery
-            winch_move(WINCH_UP);
-        }
-        
-        vTaskDelay(pdMS_TO_TICKS(50)); // Check every 50ms
     }
-    
-    char timeout_str[32];
-    get_elapsed_time_string(timeout_ms, timeout_str, sizeof(timeout_str));
-    ESP_LOGW(TAG, "Operation timeout after %s", timeout_str);
-    return ESP_ERR_TIMEOUT;
 }
 
-static esp_err_t handle_tension_recovery(winch_direction_t original_direction) {
+static esp_err_t handle_tension_recovery(state_t state) {
     ESP_LOGI(TAG, "Starting tension recovery - reversing direction for %dms", TENSION_REVERSE_TIME_MS);
-    
-    w_timer_t recovery_start;
-    timer_start(&recovery_start);
+    w_timer_t recovery_timer;
+    timer_start(&recovery_timer);
+    winch_direction_t original_direction = (state == LOWERING) ? WINCH_DOWN : WINCH_UP;
+    winch_direction_t reverse_dir = (original_direction == WINCH_DOWN) ? WINCH_UP : WINCH_DOWN;
     
     // Reverse direction briefly
-    winch_direction_t reverse_dir = (original_direction == WINCH_DOWN) ? WINCH_UP : WINCH_DOWN;
     winch_move(reverse_dir);
-    vTaskDelay(pdMS_TO_TICKS(TENSION_REVERSE_TIME_MS));
     
-    // Check if tension cleared
-    if (!inputs_get_winch_tension()) {
-        ESP_LOGI(TAG, "Tension recovered - resuming original direction after %dms pause", TENSION_RECOVERY_PAUSE_MS);
-        winch_move(original_direction);
-        vTaskDelay(pdMS_TO_TICKS(TENSION_RECOVERY_PAUSE_MS));
+    // Wait during reverse movement, checking for events
+    TickType_t reverse_start = xTaskGetTickCount();
+    while (1) {
+        InputEventExt result = wait_until_notified_or_time(reverse_start, TENSION_REVERSE_TIME_MS);
         
-        // Track recovery time (exclude from working time)
-        g_op_state.total_recovery_time_ms += timer_ms_since_start(&recovery_start);
-        return ESP_OK;
-    } else {
-        ESP_LOGE(TAG, "Tension recovery failed - tension still present");
-        g_op_state.total_recovery_time_ms += timer_ms_since_start(&recovery_start);
-        return ESP_ERR_INVALID_STATE;
+        switch (result.event.event_type) {
+            case HOME:
+                if (result.event.state) {  // Home sensor active
+                    ESP_LOGI(TAG, "Home reached during tension recovery");
+                    goto recovery_complete;
+                }
+                break;
+                
+            case AUTO:
+                if (!result.event.state) {  // Auto mode disabled
+                    ESP_LOGW(TAG, "AUTO disabled during tension recovery");
+                    return ESP_ERR_INVALID_STATE;
+                }
+                break;
+                
+            case TENTION:
+                if (!result.event.state) {  // Tension cleared
+                    ESP_LOGI(TAG, "Tension cleared during reverse - resuming original direction");
+                    goto tension_cleared;
+                }
+                break;
+                
+            case TIMEOUT:
+                goto tension_cleared;  // Time to check if we should continue
+        }
     }
+    
+tension_cleared:
+    winch_move(original_direction);
+    
+    // Wait during recovery pause, checking for events
+    TickType_t pause_start = xTaskGetTickCount();
+    while (1) {
+        InputEventExt result = wait_until_notified_or_time(pause_start, TENSION_RECOVERY_PAUSE_MS);
+        
+        switch (result.event.event_type) {
+            case HOME:
+                if (result.event.state) {  // Home sensor active
+                    ESP_LOGI(TAG, "Home reached during recovery pause");
+                    goto recovery_complete;
+                }
+                break;
+                
+            case AUTO:
+                if (!result.event.state) {  // Auto mode disabled
+                    ESP_LOGW(TAG, "AUTO disabled during recovery pause");
+                    return ESP_ERR_INVALID_STATE;
+                }
+                break;
+                
+            case TENTION:
+                if (result.event.state) {  // Tension came back
+                    ESP_LOGE(TAG, "Tension returned during recovery - failed");
+                    return ESP_ERR_INVALID_STATE;
+                }
+                break;
+                
+            case TIMEOUT:
+                goto recovery_complete;
+        }
+    }
+    
+recovery_complete:
+    g_op_state.total_recovery_time_ms += timer_ms_since_start(&recovery_timer);
+    return ESP_OK;
 }
 
-static esp_err_t perform_recovery_sequence(void) {
-    ESP_LOGI(TAG, "Starting recovery sequence");
+static esp_err_t rising_timeout_recovery_sequence(void) {
+    if (g_op_state.recovery_attempts > MAX_RECOVERY_RETRIES) return ESP_ERR_INVALID_SIZE;
+    ESP_LOGW(TAG, "Timeout on rising - attempting recovery nr: %d", g_op_state.recovery_attempts);
+    w_timer_t recovery_timer;
+    timer_start(&recovery_timer);
     
-    w_timer_t recovery_start;
-    timer_start(&recovery_start);
-    
-    // Recovery: go down a bit, then up to home
+    // Recovery: go down a bit
     ESP_LOGI(TAG, "Recovery: Moving down");
     winch_move(WINCH_DOWN);
-    vTaskDelay(pdMS_TO_TICKS(RECOVERY_DOWN_TIME_MS));
+    
+    esp_err_t result = await_completion_and_handle_events(LOWERING, RECOVERY_DOWN_TIME_MS);
+    if (result != ESP_OK) return result;
     
     ESP_LOGI(TAG, "Recovery: Moving up to home");
     winch_move(WINCH_UP);
+    result = await_completion_and_handle_events(RISING, RECOVERY_UP_TIMEOUT_MS);
     
-    // Wait for home with timeout
-    esp_err_t result = wait_for_operation_complete(RISING, RECOVERY_UP_TIMEOUT_MS);
-    
-    // Track recovery time (exclude from working time)
-    g_op_state.total_recovery_time_ms += timer_ms_since_start(&recovery_start);
+    // Track recovery time
+    g_op_state.total_recovery_time_ms += timer_ms_since_start(&recovery_timer);
     g_op_state.recovery_attempts++;
     
     if (result == ESP_OK) {
@@ -767,7 +763,6 @@ static esp_err_t perform_recovery_sequence(void) {
     
     return result;
 }
-
 static void winch_move(winch_direction_t direction) {
     if (g_op_state.current_direction != direction) {
         g_op_state.current_direction = direction;
@@ -781,14 +776,12 @@ static void winch_move(winch_direction_t direction) {
 static void reset_operation_state(void) {
     // Preserve event structures BEFORE zeroing
     QueueHandle_t queue = g_op_state.event_queue;
-    EventGroupHandle_t group = g_op_state.event_group;
     
     // Zero out the entire state
     memset(&g_op_state, 0, sizeof(winch_operation_state_t));
     
     // Restore event structures
     g_op_state.event_queue = queue;
-    g_op_state.event_group = group;
     g_op_state.current_direction = WINCH_INVALID; // Force first direction change to be logged
 }
 
@@ -803,11 +796,11 @@ static bool validate_package(const motorcontroller_pkg_t *pkg) {
         return false;
     }
     
-    if (pkg->end_depth > 10000) { // Sanity check - 100m max
+    if (pkg->end_depth > 8000) { // Sanity check - 80m max
         ESP_LOGE(TAG, "Invalid end_depth: %d", pkg->end_depth);
         return false;
     }
-    
+    // make sorting of this ourself
     if (pkg->poll_type == STATIC_DEPTH) {
         // Validate static points array
         bool has_points = false;
@@ -841,6 +834,20 @@ static bool validate_package(const motorcontroller_pkg_t *pkg) {
     
     return true;
 }
+
+static void alpha_beta_update(double dt, double z_meas, double *x, double *v, double alpha, double beta) {
+    // Prediction step
+    double x_pred = *x + (*v) * dt;
+    double v_pred = *v;
+    
+    // Residual
+    double r = z_meas - x_pred;
+    
+    // Correction
+    *x = x_pred + alpha * r;
+    *v = v_pred + (beta * r) / dt;
+}
+
 
 static uint32_t calculate_expected_time_ms(uint16_t distance_cm, uint16_t speed_cm_per_s, POLL_TYPE poll_type, uint16_t samples, uint16_t interval_s) {
     if (speed_cm_per_s == 0) {
@@ -891,6 +898,15 @@ static const char* get_direction_string(winch_direction_t direction) {
     }
 }
 
+static const char* get_poll_type_string(POLL_TYPE poll_type) {
+    switch (poll_type) {
+        case ALPHA_DEPTH: return "ALPHA_DEPTH";
+        case STATIC_DEPTH: return "STATIC_DEPTH";
+        case LIN_TIME: return "LIN_TIME";
+        default: return "UNKNOWN";
+    }
+}
+
 static void get_elapsed_time_string(uint32_t ms, char* buffer, size_t buffer_size) {
     uint32_t total_seconds = ms / 1000;
     uint32_t remaining_ms  = ms % 1000;
@@ -913,24 +929,4 @@ static void get_elapsed_time_string(uint32_t ms, char* buffer, size_t buffer_siz
     }
 }
 
-static void alpha_beta_update(double dt, double z_meas, double *x, double *v, double alpha, double beta) {
-    // Prediction step
-    double x_pred = *x + (*v) * dt;
-    double v_pred = *v;
-    
-    // Residual
-    double r = z_meas - x_pred;
-    
-    // Correction
-    *x = x_pred + alpha * r;
-    *v = v_pred + (beta * r) / dt;
-}
 
-static const char* get_poll_type_string(POLL_TYPE poll_type) {
-    switch (poll_type) {
-        case ALPHA_DEPTH: return "ALPHA_DEPTH";
-        case STATIC_DEPTH: return "STATIC_DEPTH";
-        case LIN_TIME: return "LIN_TIME";
-        default: return "UNKNOWN";
-    }
-}
