@@ -152,7 +152,7 @@ esp_err_t can_bus_manager_init(void)
     }
 
     // Create receive task
-    BaseType_t ret_task = xTaskCreate(can_receive_task, "can_rx", 4096, NULL, 5, &receive_task_handle);
+    BaseType_t ret_task = xTaskCreate(can_receive_task, "can_rx", 4096, NULL, 8, &receive_task_handle); // reduce priority later
     if (ret_task != pdPASS) {
         ESP_LOGE(TAG, "Failed to create receive task");
         vSemaphoreDelete(bus_mutex);

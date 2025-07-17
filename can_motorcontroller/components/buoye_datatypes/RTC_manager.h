@@ -29,3 +29,9 @@ esp_err_t rtc_load_sheared_status(sheared_status_t *status);
 // === Next Wakeup State ===
 esp_err_t rtc_save_wakeup_state(state_t state);
 esp_err_t rtc_load_wakeup_state(state_t *state);
+
+// === Motor Controller Package Storage ===
+esp_err_t rtc_save_motorcontroller_pkg_lowering(const motorcontroller_pkg_t *pkg);
+esp_err_t rtc_load_motorcontroller_pkg_lowering(motorcontroller_pkg_t *pkg);
+esp_err_t rtc_save_motorcontroller_pkg_rising(const motorcontroller_pkg_t *pkg);
+esp_err_t rtc_load_motorcontroller_pkg_rising(motorcontroller_pkg_t *pkg);

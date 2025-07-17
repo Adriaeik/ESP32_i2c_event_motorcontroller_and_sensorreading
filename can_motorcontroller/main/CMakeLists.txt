@@ -19,6 +19,8 @@ set(MAIN_REQUIRES
 list(APPEND MAIN_REQUIRES
     can_motctrl_manager    # For manager role
     can_motctrl_worker     # For worker role
+    motorcontroller_worker
+    motorcontroller_manager
 )
 
 # Register main component

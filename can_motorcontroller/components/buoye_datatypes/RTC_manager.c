@@ -20,6 +20,8 @@ RTC_DATA_ATTR static poll_config_t rtc_poll_config;
 RTC_DATA_ATTR static size_t rtc_static_points_count;
 // Dynamisk, fordi `mesure_points` er fleksibel:
 RTC_DATA_ATTR static int rtc_static_points[64]; // juster storleik!
+RTC_DATA_ATTR static motorcontroller_pkg_t rtc_motctrl_pkg_lowering;
+RTC_DATA_ATTR static motorcontroller_pkg_t rtc_motctrl_pkg_rising;
 
 // === Intern gyldigheitsindikatorar ===
 RTC_DATA_ATTR static uint32_t rtc_magic_sensorbatch     = 0;
@@ -29,6 +31,8 @@ RTC_DATA_ATTR static uint32_t rtc_magic_sensor_config   = 0;
 RTC_DATA_ATTR static uint32_t rtc_magic_status          = 0;
 RTC_DATA_ATTR static uint32_t rtc_magic_next_wakeup = 0;
 RTC_DATA_ATTR static uint32_t rtc_magic_poll_config = 0;
+RTC_DATA_ATTR static uint32_t rtc_magic_motctrl_lowering = 0;
+RTC_DATA_ATTR static uint32_t rtc_magic_motctrl_rising = 0;
 
 #define MAGIC_SENSORBATCH       0xABCDEF01
 #define MAGIC_HUB_CONFIG        0xABCDEF01
@@ -36,7 +40,9 @@ RTC_DATA_ATTR static uint32_t rtc_magic_poll_config = 0;
 #define MAGIC_SENSOR_CONFIG     0xABCDEF04
 #define MAGIC_STATUS            0xABCDEF05
 #define MAGIC_NEXT_WAKEUP_STATE 0xABCDEF06
-#define MAGIC_POLL_CONFIG 0xABCDEF07
+#define MAGIC_POLL_CONFIG       0xABCDEF07
+#define MAGIC_MOTCTRL_LOWERING  0xABCDEF08
+#define MAGIC_MOTCTRL_RISING    0xABCDEF09
 
 // === CLEAR ===
 void RTC_manager_clear_all(void) {
@@ -44,6 +50,8 @@ void RTC_manager_clear_all(void) {
     rtc_magic_buoye_config = 0;
     rtc_magic_sensor_config = 0;
     rtc_magic_status = 0;
+    rtc_magic_motctrl_lowering = 0;
+    rtc_magic_motctrl_rising = 0;
 }
 
 // === SENSORBATCH ===
@@ -173,5 +181,39 @@ esp_err_t rtc_load_wakeup_state(state_t *state) {
         return ESP_FAIL;
     }
     *state = rtc_next_wakeup_state;
+    return ESP_OK;
+}
+
+esp_err_t rtc_save_motorcontroller_pkg_lowering(const motorcontroller_pkg_t *pkg) {
+    if (!pkg) return ESP_ERR_INVALID_ARG;
+    rtc_motctrl_pkg_lowering = *pkg;
+    rtc_magic_motctrl_lowering = MAGIC_MOTCTRL_LOWERING;
+    return ESP_OK;
+}
+
+esp_err_t rtc_load_motorcontroller_pkg_lowering(motorcontroller_pkg_t *pkg) {
+    if (!pkg) return ESP_ERR_INVALID_ARG;
+    if (rtc_magic_motctrl_lowering != MAGIC_MOTCTRL_LOWERING) {
+        ESP_LOGW_THREAD(TAG, "Ingen gyldig lowering motorcontroller pkg i RTC");
+        return ESP_FAIL;
+    }
+    *pkg = rtc_motctrl_pkg_lowering;
+    return ESP_OK;
+}
+
+esp_err_t rtc_save_motorcontroller_pkg_rising(const motorcontroller_pkg_t *pkg) {
+    if (!pkg) return ESP_ERR_INVALID_ARG;
+    rtc_motctrl_pkg_rising = *pkg;
+    rtc_magic_motctrl_rising = MAGIC_MOTCTRL_RISING;
+    return ESP_OK;
+}
+
+esp_err_t rtc_load_motorcontroller_pkg_rising(motorcontroller_pkg_t *pkg) {
+    if (!pkg) return ESP_ERR_INVALID_ARG;
+    if (rtc_magic_motctrl_rising != MAGIC_MOTCTRL_RISING) {
+        ESP_LOGW_THREAD(TAG, "Ingen gyldig rising motorcontroller pkg i RTC");
+        return ESP_FAIL;
+    }
+    *pkg = rtc_motctrl_pkg_rising;
     return ESP_OK;
 }

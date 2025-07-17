@@ -1,0 +1,167 @@
+menu "BUOYE vinsj motor controller"
+    config MOTCTRL_WORKER_ENABLE_DEEP_SLEEP
+        bool "Enable deep sleep after work completion"
+        default y
+menu "Generelle tids innstillingar - skal vekk! bruke pakken!!"
+    config STOP_IMMEDIATELY
+        bool "Stopp umiddelbart når AUTO-modus blir slått av"
+        default y
+        help
+            Dersom aktivert, vil AUTO-syklusen stoppe med ein gong AUTO blir deaktivert.
+            Dersom deaktivert, vil pågåande syklus fullførast før systemet stoppar.
+
+    config WINCH_DOWN_DURATION_S
+        int "Senketid [sekund]"
+        default 180
+        range 0 4600
+        help
+            Kor lenge vinsjen skal senke lasten. Målast i sekund.
+
+    config WINCH_PAUSE_DURATION_S
+        int "Pause mellom senk og heving [sekund]"
+        default 1800
+        range 0 6600
+        help
+            Kor lenge systemet skal pause etter senking før heving startar.
+
+    config WINCH_MAX_DURATION_S
+        int "Maksimal syklustid [sekund]"
+        default 36000
+        range 10 86400
+        help
+            Maksimal tid ei vinsjsyklus kan ta før det blir rekna som feil.
+
+    config WINCH_UP_TIMEOUT_PERCENT
+        int "Tillaten hevetidsmargin i prosent av senketid"
+        default 30
+        range 0 300
+        help
+            Toleranse for kor mykje lengre tid heving kan ta i prosent av senkingstida. Brukt til å rekne ut feilmargin for heving.
+
+    menu "Gjenopprettingsinnstillinger"
+        config RECOVERY_DOWN_TIME_S
+            int "Gjenopprettingssenking [sekund]"
+            default 5
+            range 1 30
+            help
+                Kor lenge systemet skal senke vinsjen under gjenopprettingsprosess når home-posisjon ikkje blir nådd.
+
+        config RECOVERY_PAUSE_TIME_S
+            int "Pause mellom gjenopprettingsforsøk [sekund]"
+            default 2
+            range 0 10
+            help
+                Kor lenge systemet skal pause mellom gjenopprettingsforsøk før neste forsøk startar.
+
+        config MAX_RECOVERY_RETRIES
+            int "Maksimalt antal gjenopprettingsforsøk"
+            default 3
+            range 1 10
+            help
+                Kor mange gonger systemet skal prøve å gjenopprette home-posisjon før det gir opp og krev manuell intervensjon.
+
+        config TENSION_REVERSE_TIME_S
+            int "Spenningslettetid [sekund]"
+            default 10
+            range 1 15
+            help
+                Kor lenge systemet skal køyre i motsett retning for å lette spenning før det prøver igjen når spenningsalarm blir detektert.
+    endmenu
+endmenu
+
+menu "Sensorar (input)"
+    config GPIO_WINCH_HOME
+        int "-X1:5 → GPIO for HOME"
+        default 18
+        range 0 39
+        help 
+            GPIO som skal koblast til endebrytaren som indikerer når vinsjen er heime (oppe).
+            (NO) Dette er ein inngang som skal vere låg når vinsjen er heime.
+
+    config GPIO_WINCH_TENSION
+        int "-X1:6 → GPIO for TENSION"
+        default 5
+        range 0 39
+        help
+            GPIO som skal koblast til sensoren som gir høgt signal visst det er for stor last i wiren, 
+            eller motorkontrolleren gir error signal.
+            (NO) Dette er ein inngang som skal vere låg når vinsjen er under belastning.
+
+    config GPIO_WINCH_AUTO
+        int "-X1:7 → GPIO for AUTO"
+        default 19
+        range 0 39
+        help
+            GPIO som skal koblast til brytaren som indikerer at vinsjen skal gå i MANUEL-modus (Open), 
+            eller AUTO-modus (CLOSED).
+            (NO) Dette er ein inngang som skal vere høg når vinsjen er i AUTO-modus.
+
+endmenu
+
+menu "Aktuatorar (output)"
+    config USE_WINCH_RUNNING_LAMP
+        bool "Bruk LAMP for å indikere at vinsjen er i drift"
+        default y
+        help
+            Dersom aktivert, vil LAMP bli slått på når vinsjen er i drift.
+            Dersom deaktivert, vil LAMP ikkje bli brukt.
+    
+    config USE_AUTO_LAMP
+        bool "Bruk AUTO_LAMP for å indikere at vinsjen er i AUTO-modus"
+        default y   
+        help
+            Dersom aktivert, vil AUTO_LAMP bli slått på når vinsjen er i AUTO-modus.
+            Dersom deaktivert, vil AUTO_LAMP ikkje bli brukt.
+    
+    config USE_ALARM_LAMP
+        bool "Bruk ALARM_LAMP for å indikere at vinsjen er i Alarm tilstand"
+        default y   
+        help
+            Dersom aktivert, vil ALARM_LAMP bli slått på når vinsjen er i Alarm tilstand.
+            Dersom deaktivert, vil ALARM_LAMP ikkje bli brukt.
+            
+    config GPIO_WINCH_UP
+        int "-X1:2 → GPIO for WINCH_UP"
+        default 16
+        range 0 39
+        help
+            GPIO som skal koblast til reléet som styrer vinsjen i oppover retning.
+            (NO) Dette er ein utgang som skal vere høg når vinsjen skal heve lasten.
+
+    config GPIO_WINCH_DOWN
+        int "-X1:3 → GPIO for WINCH_DOWN"
+        default 17
+        range 0 39
+        help
+            GPIO som skal koblast til reléet som styrer vinsjen i nedover retning.
+            (NO) Dette er ein utgang som skal vere høg når vinsjen skal senke lasten.
+                    
+    config GPIO_LAMP
+        int "-X1:11 → GPIO for LAMP"
+        default 20
+        range 0 39
+        depends on USE_WINCH_RUNNING_LAMP
+        help
+            GPIO som skal koblast til reléet som styrer Drifts lampe.
+            Dette er ein utgang som skal vere høg når vinsjen er i drift.
+
+    config GPIO_AUTO_LAMP
+        int "-X1:12 → GPIO for AUTO_LAMP"
+        default 2
+        range 0 39
+        depends on USE_AUTO_LAMP
+        help
+            GPIO som skal koblast til reléet som styrer AUTO lampe.
+            Dette er ein utgang som skal vere høg når vinsjen er i AUTO-modus.
+
+    config GPIO_ALARM_LAMP
+        int "-X1:13 → GPIO for ALARM_LAMP"
+        default 15
+        range 0 39
+        depends on USE_ALARM_LAMP
+        help
+            GPIO som skal koblast til reléet som styrer Alarm lampe.
+            Dette er ein utgang som skal vere høg når vinsjen er i Alarm tilstand.
+endmenu
+
+endmenu
