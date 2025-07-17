@@ -240,23 +240,6 @@ void winch_main_task(void *pvParameters) {
     }
 }
 
-void print_event(const InputEventExt *e) {
-    const char *type_str;
-    switch (e->event.event_type) {
-        case HOME:    type_str = "HOME";    break;
-        case AUTO:    type_str = "AUTO";    break;
-        case TENTION: type_str = "TENTION"; break;
-        case TIMEOUT: type_str = "TIMEOUT"; break;
-        default:      type_str = "UNKNOWN"; break;
-    }
-
-    ESP_LOGI(TAG,
-             "Event: type=%s, state=%s, edge_detected=%s, remaining_events=%" PRIu32,
-             type_str,
-             e->event.state ? "HØG" : "LÅG",
-             e->event.edge_detected ? "JA" : "NEI",
-             e->remaining_events);
-}
 
 // Function to start the worker (call this from app_main)
 void start_winch_main(void) {
