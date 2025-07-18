@@ -123,6 +123,7 @@ static void gpio_task(void* arg) {
     vTaskDelete(NULL);
 }
 
+
 // Stability checking task - ensures inputs are really stable before using them
 static void stability_task(void* arg) {
     ESP_LOGI(TAG, "Stability task started");
