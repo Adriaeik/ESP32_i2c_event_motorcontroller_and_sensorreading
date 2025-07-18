@@ -51,7 +51,8 @@
     "motorcontroller_manager.h": "c",
     "regex": "c",
     "outputs.h": "c",
-    "inputs.h": "c"
+    "inputs.h": "c",
+    "rtc_manager.h": "c"
   },
   "idf.flashType": "UART",
   "idf.portWin": "COM15"

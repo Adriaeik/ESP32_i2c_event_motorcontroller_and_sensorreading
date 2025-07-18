@@ -109,8 +109,8 @@ bool is_motorcontroller_pkg_valid(const motorcontroller_pkg_t *pkg)
     }
     
     // Check speed estimate reasonableness
-    if (pkg->prev_estimated_cm_per_s > 1000) {  // 10 m/s max
-        ESP_LOGE(TAG, "Speed estimate too high: %d cm/s", pkg->prev_estimated_cm_per_s);
+    if (pkg->prev_estimated_cm_per_s/1000 > 1000) {  // 10 m/s max
+        ESP_LOGE(TAG, "Speed estimate too high: %d cm/s", pkg->prev_estimated_cm_per_s/1000);
         return false;
     }
     

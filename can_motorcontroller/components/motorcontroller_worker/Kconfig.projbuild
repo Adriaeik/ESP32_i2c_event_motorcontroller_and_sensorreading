@@ -1,73 +1,7 @@
-menu "BUOYE vinsj motor controller"
+menu "BUOYE CAN-bus Wroker vinsj controller"
     config MOTCTRL_WORKER_ENABLE_DEEP_SLEEP
         bool "Enable deep sleep after work completion"
         default y
-menu "Generelle tids innstillingar - skal vekk! bruke pakken!!"
-    config STOP_IMMEDIATELY
-        bool "Stopp umiddelbart når AUTO-modus blir slått av"
-        default y
-        help
-            Dersom aktivert, vil AUTO-syklusen stoppe med ein gong AUTO blir deaktivert.
-            Dersom deaktivert, vil pågåande syklus fullførast før systemet stoppar.
-
-    config WINCH_DOWN_DURATION_S
-        int "Senketid [sekund]"
-        default 180
-        range 0 4600
-        help
-            Kor lenge vinsjen skal senke lasten. Målast i sekund.
-
-    config WINCH_PAUSE_DURATION_S
-        int "Pause mellom senk og heving [sekund]"
-        default 1800
-        range 0 6600
-        help
-            Kor lenge systemet skal pause etter senking før heving startar.
-
-    config WINCH_MAX_DURATION_S
-        int "Maksimal syklustid [sekund]"
-        default 36000
-        range 10 86400
-        help
-            Maksimal tid ei vinsjsyklus kan ta før det blir rekna som feil.
-
-    config WINCH_UP_TIMEOUT_PERCENT
-        int "Tillaten hevetidsmargin i prosent av senketid"
-        default 30
-        range 0 300
-        help
-            Toleranse for kor mykje lengre tid heving kan ta i prosent av senkingstida. Brukt til å rekne ut feilmargin for heving.
-
-    menu "Gjenopprettingsinnstillinger"
-        config RECOVERY_DOWN_TIME_S
-            int "Gjenopprettingssenking [sekund]"
-            default 5
-            range 1 30
-            help
-                Kor lenge systemet skal senke vinsjen under gjenopprettingsprosess når home-posisjon ikkje blir nådd.
-
-        config RECOVERY_PAUSE_TIME_S
-            int "Pause mellom gjenopprettingsforsøk [sekund]"
-            default 2
-            range 0 10
-            help
-                Kor lenge systemet skal pause mellom gjenopprettingsforsøk før neste forsøk startar.
-
-        config MAX_RECOVERY_RETRIES
-            int "Maksimalt antal gjenopprettingsforsøk"
-            default 3
-            range 1 10
-            help
-                Kor mange gonger systemet skal prøve å gjenopprette home-posisjon før det gir opp og krev manuell intervensjon.
-
-        config TENSION_REVERSE_TIME_S
-            int "Spenningslettetid [sekund]"
-            default 10
-            range 1 15
-            help
-                Kor lenge systemet skal køyre i motsett retning for å lette spenning før det prøver igjen når spenningsalarm blir detektert.
-    endmenu
-endmenu
 
 menu "Sensorar (input)"
     config GPIO_WINCH_HOME

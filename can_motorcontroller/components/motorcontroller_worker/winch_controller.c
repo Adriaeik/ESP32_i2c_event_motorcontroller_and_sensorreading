@@ -14,17 +14,19 @@
 static const char* TAG = "winch_controller";
 
 // Timing and safety constants
-#define WINCH_TIMEOUT_SAFETY_MARGIN_PERCENT  30
-#define SOFT_START_STOP_COMPENSATION_MS      500
-#define STATIC_POLL_STOP_OFFSET_MS          1000
-#define STATIC_POLL_TIMING_BUFFER_MS         200
-#define MIN_OPERATION_TIME_MS                100
-#define RECOVERY_DOWN_TIME_MS               2000
-#define RECOVERY_UP_TIMEOUT_MS              8000
-#define RECOVERY_PAUSE_TIME_MS              1000
-#define MAX_RECOVERY_RETRIES                3
-#define TENSION_REVERSE_TIME_MS             1000
-#define TENSION_RECOVERY_PAUSE_MS           500
+#define MAXIMUM_DEPTH                        8000 //80m
+#define MAXIMUM_SPEED                       50000 //50cm/s
+#define MAX_RECOVERY_RETRIES                    3
+#define WINCH_TIMEOUT_SAFETY_MARGIN_PERCENT    30
+#define SOFT_START_STOP_COMPENSATION_MS       500
+#define STATIC_POLL_STOP_OFFSET_MS           1000
+#define STATIC_POLL_TIMING_BUFFER_MS          200
+#define MIN_OPERATION_TIME_MS                 100
+#define RECOVERY_DOWN_TIME_MS                2000
+#define RECOVERY_UP_TIMEOUT_MS               8000
+#define RECOVERY_PAUSE_TIME_MS               1000
+#define TENSION_REVERSE_TIME_MS              1000
+#define TENSION_RECOVERY_PAUSE_MS             500
 
 // Event group bits for operation control
 #define OPERATION_COMPLETE_BIT      BIT0
@@ -64,7 +66,9 @@ typedef struct {
     uint8_t current_static_point;           // Index in static_points array
     uint16_t current_target_depth;          // Current depth target
     bool in_static_wait;                    // Currently waiting at static point
-    
+    uint8_t num_points;
+    uint16_t sorted_static_points[MAX_POINTS]; // Sorted based on direction
+
     // Error handling and recovery
     uint8_t recovery_attempts;
     
@@ -84,22 +88,23 @@ static TaskHandle_t g_monitor_task_handle = NULL;
 static volatile bool g_monitor_task_should_exit = false;
 
 // Forward declarations
+static esp_err_t execute_operation_internal(const motorcontroller_pkg_t *pkg, motorcontroller_response_t *resp);
 static InputEventExt wait_until_notified_or_time(TickType_t start_tick, uint32_t wait_time_ms);
 static esp_err_t check_initial_input_state(void);
-static esp_err_t execute_operation_internal(const motorcontroller_pkg_t *pkg, motorcontroller_response_t *resp);
-static void update_speed_estimate_pre_operation(const motorcontroller_pkg_t *pkg);
+static esp_err_t await_completion_and_handle_events(state_t STATE, uint32_t timeout_ms);
+static void winch_move(winch_direction_t direction);
+
 static esp_err_t handle_time_based_operation(state_t state, uint32_t operation_time_ms, uint32_t timeout_ms, const char* mode_name);
 static esp_err_t handle_static_depth_mode(state_t state);
 static esp_err_t handle_alpha_depth_mode(state_t state);
 static esp_err_t handle_lin_time_mode(state_t state);
-static esp_err_t await_completion_and_handle_events(state_t STATE, uint32_t timeout_ms);
-static esp_err_t rising_timeout_recovery_sequence(void);
 static esp_err_t handle_tension_recovery(state_t state);
-static void winch_move(winch_direction_t direction);
+static esp_err_t handle_rising_timeout_recovery_sequence(void);
+
 static void reset_operation_state(void);
+
 static bool validate_package(const motorcontroller_pkg_t *pkg);
-static uint32_t calculate_expected_time_ms(uint16_t distance_cm, uint16_t speed_cm_per_s, POLL_TYPE poll_type, uint16_t samples, uint16_t interval_s);
-static void alpha_beta_update(double dt, double z_meas, double *x, double *v, double alpha, double beta);
+
 static const char* get_direction_string(winch_direction_t direction);
 static const char* get_poll_type_string(POLL_TYPE poll_type);
 static void get_elapsed_time_string(uint32_t ms, char* buffer, size_t buffer_size);
@@ -382,46 +387,6 @@ static esp_err_t check_initial_input_state(void){
     return ESP_OK;
 }
 
-static void update_speed_estimate_pre_operation(const motorcontroller_pkg_t *pkg) {
-    // Start with previous estimate - fallback
-    g_op_state.updated_speed_estimate = pkg->prev_estimated_cm_per_s;
-    
-    // If we have previous operation data, apply alpha-beta filter
-    if (pkg->prev_working_time > 0 && pkg->prev_reported_depth > 0) {
-        
-        // Calculate avrage speed
-        double actual_distance_cm = (double)pkg->prev_reported_depth;
-        double actual_time_s = (double)pkg->prev_working_time;
-        
-        if (actual_time_s > 0.1 && actual_distance_cm > 0) {
-            // Current state for filter
-            double predicted_distance = actual_distance_cm;
-            double predicted_velocity = (double)pkg->prev_estimated_cm_per_s / 1000.0;
-            
-            // Measured velocity from actual operation
-            double measured_velocity = actual_distance_cm / (actual_time_s * 1000.0);
-            
-            // Apply alpha-beta filter
-            alpha_beta_update(actual_time_s, actual_distance_cm, 
-                            &predicted_distance, &predicted_velocity, 
-                            pkg->alpha, pkg->beta);
-            
-            // Update estimate (convert back to scaled format)
-            uint16_t new_estimate = (uint16_t)(predicted_velocity * 1000.0);
-            
-            if (new_estimate > 0 && new_estimate < 50000) {
-                g_op_state.updated_speed_estimate = new_estimate;
-                ESP_LOGI(TAG, "Speed estimate updated: %.0f -> %.0f cm/s (distance: %.0f cm, time: %.1f s)", 
-                         (double)pkg->prev_estimated_cm_per_s / 1000.0,
-                         (double)new_estimate / 1000.0, actual_distance_cm, actual_time_s);
-            } else {
-                ESP_LOGW(TAG, "Speed estimate rejected (out of range): %.0f cm/s", 
-                         (double)new_estimate / 1000.0);
-            }
-        }
-    }
-}
-
 static esp_err_t handle_time_based_operation(state_t state, uint32_t operation_time_ms, uint32_t timeout_ms, const char* mode_name) {
     char time_str[32];
     get_elapsed_time_string(operation_time_ms, time_str, sizeof(time_str));
@@ -438,15 +403,17 @@ static esp_err_t handle_time_based_operation(state_t state, uint32_t operation_t
             // RISING: Wait for home sensor or timeout
             result = await_completion_and_handle_events(state, timeout_ms);
             if (result == ESP_ERR_TIMEOUT) {
-                while (rising_timeout_recovery_sequence() != ESP_ERR_TIMEOUT) break; 
-            }
+                while (handle_rising_timeout_recovery_sequence() == ESP_ERR_TIMEOUT); // will return ESP_ERR_INVALID_SIZE when max retriez used!
+                break; 
+            } 
+            ESP_LOGI(TAG, "%s Rising completed after %s", mode_name, time_str);
             break;
             
         case LOWERING: 
             // LOWERING: Just run for the calculated time            
             result = await_completion_and_handle_events(state, operation_time_ms);
             if (result == ESP_OK) {
-                ESP_LOGI(TAG, "%s lowering completed after %s", mode_name, time_str);
+                ESP_LOGI(TAG, "%s Lowering completed after %s", mode_name, time_str);
             }
             break;
 
@@ -462,14 +429,13 @@ static esp_err_t handle_alpha_depth_mode(state_t state) {
     const motorcontroller_pkg_t *pkg = g_op_state.current_pkg;
     
     // Calculate expected time based on distance and speed
-    uint32_t expected_time_ms = calculate_expected_time_ms(pkg->end_depth, g_op_state.updated_speed_estimate, 
-                                                          pkg->poll_type, pkg->samples, pkg->static_poll_interval_s);
+    uint32_t operation_time_ms = calculate_expected_time_ms(pkg->end_depth, g_op_state.updated_speed_estimate);
     // Apply timeout safety margin
-    uint32_t timeout_ms = (expected_time_ms * (100 + pkg->rising_timeout_percent)) / 100;
+    uint32_t timeout_ms = (operation_time_ms * (100 + pkg->rising_timeout_percent)) / 100;
     
     ESP_LOGI(TAG, "ALPHA_DEPTH mode: Expected time, Distance %d cm", pkg->end_depth);
     
-    return handle_time_based_operation(state, expected_time_ms, timeout_ms, "ALPHA_DEPTH");
+    return handle_time_based_operation(state, operation_time_ms, timeout_ms, "ALPHA_DEPTH");
 }
 
 static esp_err_t handle_lin_time_mode(state_t state) {
@@ -477,17 +443,22 @@ static esp_err_t handle_lin_time_mode(state_t state) {
     
     // Use static_poll_interval_s as the operation time
     uint32_t operation_time_ms = pkg->static_poll_interval_s * 1000;
-    uint32_t timeout_ms = operation_time_ms; // Same timeout as operation time for LIN_TIME
+    uint32_t timeout_ms = (operation_time_ms * (100 + pkg->rising_timeout_percent)) / 100;
     
     return handle_time_based_operation(state, operation_time_ms, timeout_ms, "LIN_TIME");
 }
 
 static esp_err_t handle_static_depth_mode(state_t state) {
     const motorcontroller_pkg_t *pkg = g_op_state.current_pkg;
+    if (pkg->static_poll_interval_s == 0 || pkg->samples <= 1) {
+        uint32_t operation_time_ms = calculate_expected_time_ms(pkg->end_depth, g_op_state.updated_speed_estimate);
+        uint32_t timeout_ms = (operation_time_ms * (100 + pkg->rising_timeout_percent)) / 100;
+        return handle_time_based_operation(state, operation_time_ms, timeout_ms, "STATIC_DEPTH");
+    }
     bool is_rising = (state == RISING);
     
     // Validate static points array
-    uint8_t num_points = 0;
+    uint8_t num_points = g_op_state.num_points;
     for (int i = 0; i < MAX_POINTS && pkg->static_points[i] != 0; i++) {
         num_points++;
     }
@@ -503,7 +474,7 @@ static esp_err_t handle_static_depth_mode(state_t state) {
     // Process each static point
     for (uint8_t i = 0; i < num_points; i++) {
         g_op_state.current_static_point = i;
-        g_op_state.current_target_depth = pkg->static_points[i];
+        g_op_state.current_target_depth = g_op_state.sorted_static_points[i];
         
         ESP_LOGI(TAG, "Moving to static point %d: %d cm", i + 1, g_op_state.current_target_depth);
         
@@ -512,11 +483,10 @@ static esp_err_t handle_static_depth_mode(state_t state) {
         if (i == 0) {
             distance_to_point = g_op_state.current_target_depth;
         } else {
-            distance_to_point = abs(g_op_state.current_target_depth - pkg->static_points[i-1]);
+            distance_to_point = abs(g_op_state.current_target_depth - g_op_state.sorted_static_points[i-1]);
         }
         
-        uint32_t travel_time_ms = calculate_expected_time_ms(distance_to_point, g_op_state.updated_speed_estimate,
-                                                             ALPHA_DEPTH, 0, 0);  // Simple travel time, no static pauses
+        uint32_t travel_time_ms = calculate_expected_time_ms(distance_to_point, g_op_state.updated_speed_estimate);  // Simple travel time, no static pauses
         
         char travel_str[32];
         get_elapsed_time_string(travel_time_ms, travel_str, sizeof(travel_str));
@@ -535,7 +505,7 @@ static esp_err_t handle_static_depth_mode(state_t state) {
             return result;  // Error occurred (AUTO disabled, etc.)
         }
         
-        ESP_LOGI(TAG, "Reached point %d, starting static wait", i + 1);
+        ESP_LOGI(TAG, "Reached point %d/%d, starting static wait", i + 1, num_points);
         
         // Static wait period: static_poll_interval_s * samples + OFFSET
         uint32_t static_wait_ms = (pkg->static_poll_interval_s * pkg->samples * 1000) + STATIC_POLL_STOP_OFFSET_MS;
@@ -598,10 +568,9 @@ wait_complete:
         
         // Calculate timeout based on distance from last point to surface plus buffer
         uint32_t distance_to_home = pkg->static_points[num_points-1]; // Distance from last point to surface
-        uint32_t timeout_ms = calculate_expected_time_ms(distance_to_home, g_op_state.updated_speed_estimate, 
-                                                        ALPHA_DEPTH, 0, 0) + 5000; // 5 second buffer
+        uint32_t timeout_ms = calculate_expected_time_ms(distance_to_home, g_op_state.updated_speed_estimate) + 5000; // 5 second buffer
         
-        return await_completion_and_handle_events(state, timeout_ms);
+        return handle_time_based_operation(state, timeout_ms, timeout_ms, "STATIC_DEPTH");
     }
     
     return ESP_OK;
@@ -610,7 +579,7 @@ wait_complete:
 static esp_err_t await_completion_and_handle_events(state_t STATE, uint32_t timeout_ms) {
     TickType_t start_tick = xTaskGetTickCount();
     
-    ESP_LOGI(TAG, "Waiting for operation complete , timeout: %d ms", timeout_ms);
+    ESP_LOGI(TAG, "Waiting for operation complete , timeout: %d s", timeout_ms/1000);
     
     while (1) {
         InputEventExt result = wait_until_notified_or_time(start_tick, timeout_ms);
@@ -695,6 +664,10 @@ static esp_err_t handle_tension_recovery(state_t state) {
     }
     
 tension_cleared:
+    if (inputs_get_winch_tension()){
+        winch_move(WINCH_STOP);
+        return ESP_FAIL; //return if its still tention..
+    }
     winch_move(original_direction);
     
     // Wait during recovery pause, checking for events
@@ -734,9 +707,10 @@ recovery_complete:
     return ESP_OK;
 }
 
-static esp_err_t rising_timeout_recovery_sequence(void) {
+static esp_err_t handle_rising_timeout_recovery_sequence(void) {
+    g_op_state.recovery_attempts++;
     if (g_op_state.recovery_attempts > MAX_RECOVERY_RETRIES) return ESP_ERR_INVALID_SIZE;
-    ESP_LOGW(TAG, "Timeout on rising - attempting recovery nr: %d", g_op_state.recovery_attempts);
+    ESP_LOGW(TAG, "Timeout on rising - attempting recovery nr: %d/%d", g_op_state.recovery_attempts, MAX_RECOVERY_RETRIES);
     w_timer_t recovery_timer;
     timer_start(&recovery_timer);
     
@@ -753,7 +727,6 @@ static esp_err_t rising_timeout_recovery_sequence(void) {
     
     // Track recovery time
     g_op_state.total_recovery_time_ms += timer_ms_since_start(&recovery_timer);
-    g_op_state.recovery_attempts++;
     
     if (result == ESP_OK) {
         ESP_LOGI(TAG, "Recovery successful");
@@ -785,6 +758,32 @@ static void reset_operation_state(void) {
     g_op_state.current_direction = WINCH_INVALID; // Force first direction change to be logged
 }
 
+static uint8_t sort_and_deduplicate_points(uint16_t *points, uint8_t count) {
+    if (count <= 1) return count;
+    
+    // Simple bubble sort (small arrays, so efficiency doesn't matter)
+    for (int i = 0; i < count - 1; i++) {
+        for (int j = 0; j < count - 1 - i; j++) {
+            if (points[j] > points[j + 1]) {
+                uint16_t temp = points[j];
+                points[j] = points[j + 1];
+                points[j + 1] = temp;
+            }
+        }
+    }
+    
+    // Remove duplicates (array is now sorted)
+    uint8_t unique_count = 1;
+    for (int i = 1; i < count; i++) {
+        if (points[i] != points[unique_count - 1]) {
+            points[unique_count] = points[i];
+            unique_count++;
+        }
+    }
+    
+    return unique_count;
+}
+
 static bool validate_package(const motorcontroller_pkg_t *pkg) {
     if (pkg->STATE < INIT || pkg->STATE > RISING) {
         ESP_LOGE(TAG, "Invalid STATE: %d", pkg->STATE);
@@ -796,97 +795,152 @@ static bool validate_package(const motorcontroller_pkg_t *pkg) {
         return false;
     }
     
-    if (pkg->end_depth > 8000) { // Sanity check - 80m max
+    if (pkg->end_depth > MAXIMUM_DEPTH) { // Sanity check - 80m max
         ESP_LOGE(TAG, "Invalid end_depth: %d", pkg->end_depth);
         return false;
     }
+    // TODO:: ADD one for speed when we know what we can expect! 
+
     // make sorting of this ourself
-    if (pkg->poll_type == STATIC_DEPTH) {
-        // Validate static points array
-        bool has_points = false;
-        for (int i = 0; i < MAX_POINTS; i++) {
-            if (pkg->static_points[i] != 0) {
-                has_points = true;
-                if (i > 0) {
-                    // For LOWERING: points should be ascending (0 < 200 < 400)
-                    // For RISING: points can be descending (600 > 400 > 200)
-                    bool ascending = pkg->static_points[i] > pkg->static_points[i-1];
-                    bool descending = pkg->static_points[i] < pkg->static_points[i-1];
-                    if (pkg->STATE == LOWERING && !ascending) {
-                        ESP_LOGE(TAG, "LOWERING static points must be ascending at index %d (%d <= %d)", 
-                                 i, pkg->static_points[i], pkg->static_points[i-1]);
-                        return false;
-                    } else if (pkg->STATE == RISING && !descending) {
-                        ESP_LOGE(TAG, "RISING static points must be descending at index %d (%d >= %d)", 
-                                 i, pkg->static_points[i], pkg->static_points[i-1]);
-                        return false;
-                    }
-                }
+     if (pkg->poll_type == STATIC_DEPTH) {
+        // Step 1: Extract valid points (within depth limit)
+        uint16_t temp_points[MAX_POINTS];
+        uint8_t valid_count = 0;
+        
+        for (int i = 0; i < MAX_POINTS && pkg->static_points[i] != 0; i++) {
+            if (pkg->static_points[i] <= MAXIMUM_DEPTH) {
+                temp_points[valid_count] = pkg->static_points[i];
+                valid_count++;
+                ESP_LOGD(TAG, "Accepted point %d: %d cm", valid_count, pkg->static_points[i]);
             } else {
-                break; // End of array
+                ESP_LOGW(TAG, "Rejected point %d: %d cm (exceeds max depth %d)", 
+                         i, pkg->static_points[i], MAXIMUM_DEPTH);
             }
         }
-        if (!has_points) {
-            ESP_LOGE(TAG, "STATIC_DEPTH mode requires static points");
+        
+        if (valid_count == 0) {
+            ESP_LOGE(TAG, "STATIC_DEPTH: No valid static points after filtering");
             return false;
         }
+        
+        // Step 2: Sort ascending and remove duplicates
+        uint8_t original_count = valid_count;
+        valid_count = sort_and_deduplicate_points(temp_points, valid_count);
+        
+        if (valid_count != original_count) {
+            ESP_LOGI(TAG, "Removed %d duplicate points, %d unique points remaining", 
+                     original_count - valid_count, valid_count);
+        }
+        
+        // Step 3: Log sorted points for verification
+        ESP_LOGI(TAG, "Sorted static points (ascending):");
+        for (int i = 0; i < valid_count; i++) {
+            ESP_LOGI(TAG, "  Point %d: %d cm", i + 1, temp_points[i]);
+        }
+        
+        // Step 4: Copy to global state in correct order based on direction
+        g_op_state.num_points = valid_count;
+        
+        if (pkg->STATE == RISING) {
+            // Reverse for rising (descending: 600 → 400 → 200)
+            for (int i = 0; i < valid_count; i++) {
+                g_op_state.sorted_static_points[i] = temp_points[valid_count - 1 - i];
+            }
+            ESP_LOGI(TAG, "RISING: Using %d static points in descending order", valid_count);
+        } else {
+            // Keep ascending for lowering (0 → 200 → 400)
+            for (int i = 0; i < valid_count; i++) {
+                g_op_state.sorted_static_points[i] = temp_points[i];
+            }
+            ESP_LOGI(TAG, "LOWERING: Using %d static points in ascending order", valid_count);
+        }
+        
+        // Step 5: Log final order for debugging
+        ESP_LOGI(TAG, "Final static points order for %s:", 
+                 pkg->STATE == RISING ? "RISING" : "LOWERING");
+        for (int i = 0; i < valid_count; i++) {
+            ESP_LOGI(TAG, "  Point %d: %d cm", i + 1, g_op_state.sorted_static_points[i]);
+        }
+        
+        // Step 6: Validate final sequence makes sense
+        if (pkg->STATE == RISING) {
+            // Should be descending
+            for (int i = 1; i < valid_count; i++) {
+                if (g_op_state.sorted_static_points[i] >= g_op_state.sorted_static_points[i-1]) {
+                    ESP_LOGE(TAG, "RISING validation failed: point %d (%d) >= point %d (%d)", 
+                             i+1, g_op_state.sorted_static_points[i], 
+                             i, g_op_state.sorted_static_points[i-1]);
+                    return false;
+                }
+            }
+        } else {
+            // Should be ascending  
+            for (int i = 1; i < valid_count; i++) {
+                if (g_op_state.sorted_static_points[i] <= g_op_state.sorted_static_points[i-1]) {
+                    ESP_LOGE(TAG, "LOWERING validation failed: point %d (%d) <= point %d (%d)", 
+                             i+1, g_op_state.sorted_static_points[i], 
+                             i, g_op_state.sorted_static_points[i-1]);
+                    return false;
+                }
+            }
+        }
+        
+        ESP_LOGI(TAG, "Static points validation successful: %d points, direction %s", 
+                 valid_count, pkg->STATE == RISING ? "RISING" : "LOWERING");
     }
     
     return true;
 }
 
-static void alpha_beta_update(double dt, double z_meas, double *x, double *v, double alpha, double beta) {
-    // Prediction step
-    double x_pred = *x + (*v) * dt;
-    double v_pred = *v;
-    
-    // Residual
-    double r = z_meas - x_pred;
-    
-    // Correction
-    *x = x_pred + alpha * r;
-    *v = v_pred + (beta * r) / dt;
-}
-
-
-static uint32_t calculate_expected_time_ms(uint16_t distance_cm, uint16_t speed_cm_per_s, POLL_TYPE poll_type, uint16_t samples, uint16_t interval_s) {
-    if (speed_cm_per_s == 0) {
+uint32_t calculate_expected_time_ms(uint16_t distance_cm, uint16_t speed_cm_per_s) {
+    if (speed_cm_per_s == 0 || speed_cm_per_s > UINT16_MAX) {
         ESP_LOGW(TAG, "Zero speed estimate, using default time");
         return 10000; // 10 second default
     }
-    
     // Convert scaled speed back to real cm/s (scaling: 1000 = 1 cm/s)
     double real_speed = (double)speed_cm_per_s / 1000.0;
     
     // Calculate basic travel time in seconds, convert to ms
-    uint32_t travel_time_ms = (uint32_t)((distance_cm / real_speed) * 1000.0);
-    
-    // Add static pause times if applicable
-    uint32_t static_pause_time_ms = 0;
-    if (poll_type == STATIC_DEPTH && samples > 0 && interval_s > 0) {
-        // Estimate number of static points (rough approximation)
-        uint8_t estimated_points = (distance_cm / 200) + 1; // Assume points every 2m
-        if (estimated_points > MAX_POINTS) estimated_points = MAX_POINTS;
-        
-        // Each point: (samples * interval_s * 1000) + STOP_OFFSET_MS
-        uint32_t pause_per_point = (samples * interval_s * 1000) + STATIC_POLL_STOP_OFFSET_MS;
-        static_pause_time_ms = estimated_points * pause_per_point;
-        
-        ESP_LOGD(TAG, "Static mode: %" PRIu32 " estimated points, %" PRIu32 " ms pause per point", 
-                 estimated_points, pause_per_point);
-    }
-    
-    uint32_t total_time_ms = travel_time_ms + static_pause_time_ms;
-    
-    // Sanity checks
-    if (total_time_ms < MIN_OPERATION_TIME_MS) {
-        total_time_ms = MIN_OPERATION_TIME_MS;
-    } else if (total_time_ms > 300000) { // 5 minute max
-        total_time_ms = 300000;
-    }
-    
-    return total_time_ms;
+    return (uint32_t)((distance_cm / real_speed) * 1000.0);
 }
+
+uint16_t update_speed_estimate_pre_operation(const motorcontroller_pkg_t *pkg) {
+    // Start with previous estimate - fallback
+    g_op_state.updated_speed_estimate = pkg->prev_estimated_cm_per_s;
+    
+    // If we have previous operation data, update speed estimate
+    if (pkg->prev_working_time > 0 && pkg->prev_reported_depth > 0) {
+        
+        double actual_distance_cm = (double)pkg->prev_reported_depth;
+        double actual_time_s = (double)pkg->prev_working_time;
+        
+        if (actual_time_s > 0.1 && actual_distance_cm > 0) {
+            // Calculate measured speed from last operation
+            double measured_speed_cm_per_s = actual_distance_cm / actual_time_s;
+            double previous_speed_cm_per_s = (double)pkg->prev_estimated_cm_per_s / 1000.0;
+            
+            // Use exponential moving average instead of alpha-beta filter
+            // alpha acts as the learning rate (0.0 = no update, 1.0 = full replacement)
+            double updated_speed = previous_speed_cm_per_s * (1.0 - pkg->alpha) + 
+                                 measured_speed_cm_per_s * pkg->alpha;
+            
+            // Convert back to scaled format
+            uint16_t new_estimate = (uint16_t)(updated_speed * 1000.0);
+            
+            if (new_estimate > 0 && new_estimate < 50000) {
+                g_op_state.updated_speed_estimate = new_estimate;
+                ESP_LOGI(TAG, "Speed estimate updated: %.1f -> %.1f cm/s (measured: %.1f cm/s, distance: %.0f cm, time: %.1f s)", 
+                         previous_speed_cm_per_s, updated_speed, measured_speed_cm_per_s,
+                         actual_distance_cm, actual_time_s);
+            } else {
+                ESP_LOGW(TAG, "Speed estimate rejected (out of range): %.1f cm/s", 
+                         updated_speed);
+            }
+        }
+    }
+    return g_op_state.updated_speed_estimate;
+}
+
 
 static const char* get_direction_string(winch_direction_t direction) {
     switch (direction) {

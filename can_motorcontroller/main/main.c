@@ -8,6 +8,13 @@
 #include "esp_sleep.h"
 #include "freertos/task.h"
 #include "RTC_manager.h"
+
+#include <stdio.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <math.h>
+#include <string.h>
+
 // Uncomment for manager, comment for worker
 // #define ROLE_MANAGER         // <------------
 
@@ -19,20 +26,220 @@ static const char *TAG = "MAIN";
 #ifdef MOTORCONTROLL_TEST
 
 
+//////////////////////////////////////TEST FUNCTIONS - speed estimate etc..
+
+// Test helper macros
+#define TEST_ASSERT(condition, message) \
+    do { \
+        if (!(condition)) { \
+            ESP_LOGE(TAG, "FAIL: %s", message); \
+            return false; \
+        } \
+    } while(0)
+
+#define TEST_ASSERT_EQUAL_UINT32(expected, actual, message) \
+    do { \
+        if ((expected) != (actual)) { \
+            ESP_LOGE(TAG, "FAIL: %s - Expected: %u, Actual: %u", message, (unsigned)(expected), (unsigned)(actual)); \
+            return false; \
+        } \
+    } while(0)
+
+#define TEST_ASSERT_FLOAT_WITHIN(delta, expected, actual, message) \
+    do { \
+        if (fabs((expected) - (actual)) > (delta)) { \
+            ESP_LOGE(TAG, "FAIL: %s - Expected: %.3f, Actual: %.3f", message, (expected), (actual)); \
+            return false; \
+        } \
+    } while(0)
+
+// Function declarations - these should be implemented in your motor controller module
+
+bool test_calculate_expected_time_ms_normal_cases() {
+    ESP_LOGI(TAG, "Testing calculate_expected_time_ms normal cases...");
+    
+    // Test: 100cm at 10 cm/s (scaled 10000) should take 10 seconds = 10000ms
+    TEST_ASSERT_EQUAL_UINT32(10000, calculate_expected_time_ms(100, 10000), "100cm at 10cm/s");
+    
+    // Test: 50cm at 5 cm/s (scaled 5000) should take 10 seconds = 10000ms
+    TEST_ASSERT_EQUAL_UINT32(10000, calculate_expected_time_ms(50, 5000), "50cm at 5cm/s");
+    
+    // Test: 200cm at 20 cm/s (scaled 20000) should take 10 seconds = 10000ms
+    TEST_ASSERT_EQUAL_UINT32(10000, calculate_expected_time_ms(200, 20000), "200cm at 20cm/s");
+    
+    // Test: 30cm at 15 cm/s (scaled 15000) should take 2 seconds = 2000ms
+    TEST_ASSERT_EQUAL_UINT32(2000, calculate_expected_time_ms(30, 15000), "30cm at 15cm/s");
+    
+    ESP_LOGI(TAG, "PASS: calculate_expected_time_ms normal cases");
+    return true;
+}
+
+bool test_calculate_expected_time_ms_edge_cases() {
+    ESP_LOGI(TAG, "Testing calculate_expected_time_ms edge cases...");
+    
+    // Test: Zero speed should return default 10000ms
+    TEST_ASSERT_EQUAL_UINT32(10000, calculate_expected_time_ms(100, 0), "Zero speed");
+    
+    // Test: Very high speed should return default 10000ms
+    TEST_ASSERT_EQUAL_UINT32(10000, calculate_expected_time_ms(100, 50000), "Very high speed");
+    
+    ESP_LOGI(TAG, "PASS: calculate_expected_time_ms edge cases");
+    return true;
+}
+
+bool test_update_speed_estimate_convergence() {
+    ESP_LOGI(TAG, "Testing update_speed_estimate convergence...");
+    
+    motorcontroller_pkg_t pkg;
+    memset(&pkg, 0, sizeof(pkg));
+    
+    // Set up test parameters - aggressive learning for slow system
+    pkg.alpha = 0.9;  // Aggressive learning since updates are infrequent
+    pkg.beta = 0.1;   // Not used anymore
+    pkg.prev_estimated_cm_per_s = UINT16_MAX; // Initial estimate: 10 cm/s
+    
+    ESP_LOGI(TAG, "Initial speed estimate: %.1f cm/s", pkg.prev_estimated_cm_per_s / 1000.0);
+    
+    // Simulate multiple operations where actual speed is consistently 8.3 cm/s
+    // (100cm in 12 seconds = 8.33 cm/s)
+    for (int iteration = 1; iteration <= 5; iteration++) {  // Reduced iterations since aggressive learning
+        pkg.prev_working_time = 12; 
+        pkg.prev_reported_depth = 100;
+        
+        uint16_t new_estimate = update_speed_estimate_pre_operation(&pkg);
+        
+        ESP_LOGI(TAG, "Iteration %d: Speed estimate = %.1f cm/s", 
+               iteration, new_estimate / 1000.0);
+        
+        // Update for next iteration
+        pkg.prev_estimated_cm_per_s = new_estimate;
+    }
+    
+    // With aggressive learning, should converge quickly to actual 8.3 cm/s
+    double final_estimate = pkg.prev_estimated_cm_per_s / 1000.0;
+    TEST_ASSERT_FLOAT_WITHIN(0.5, 8.3, final_estimate, "Speed estimate convergence to actual speed");
+    
+    ESP_LOGI(TAG, "PASS: update_speed_estimate convergence");
+    return true;
+}
+
+bool test_update_speed_estimate_edge_cases() {
+    ESP_LOGI(TAG, "Testing update_speed_estimate edge cases...");
+    
+    motorcontroller_pkg_t pkg;
+    memset(&pkg, 0, sizeof(pkg));
+    
+    // Test: No previous operation data
+    pkg.prev_working_time = 0;
+    pkg.prev_reported_depth = 0;
+    pkg.prev_estimated_cm_per_s = 15000;
+    
+    uint16_t result = update_speed_estimate_pre_operation(&pkg);
+    TEST_ASSERT_EQUAL_UINT32(15000, result, "No previous data should return previous estimate");
+    
+    // Test: Zero working time
+    pkg.prev_working_time = 0;
+    pkg.prev_reported_depth = 100;
+    pkg.prev_estimated_cm_per_s = 15000;
+    
+    result = update_speed_estimate_pre_operation(&pkg);
+    TEST_ASSERT_EQUAL_UINT32(15000, result, "Zero working time should return previous estimate");
+    
+    ESP_LOGI(TAG, "PASS: update_speed_estimate edge cases");
+    return true;
+}
+
+bool test_realistic_scenario() {
+    ESP_LOGI(TAG, "Testing realistic operational scenario...");
+    
+    motorcontroller_pkg_t pkg;
+    memset(&pkg, 0, sizeof(pkg));
+    
+    // Realistic parameters for hourly updates
+    pkg.alpha = 0.9;  // Aggressive learning for infrequent updates
+    pkg.beta = 0.2;   // Not used in current implementation
+    pkg.prev_estimated_cm_per_s = 12000; // Initial estimate: 12 cm/s
+    
+    ESP_LOGI(TAG, "Initial speed estimate: %.1f cm/s", pkg.prev_estimated_cm_per_s / 1000.0);
+    
+    // Simulate 5 operations with varying actual speeds
+    int operations[][2] = {
+        {150, 15}, // 150cm in 15s = 10 cm/s
+        {200, 18}, // 200cm in 18s = 11.1 cm/s  
+        {120, 12}, // 120cm in 12s = 10 cm/s
+        {180, 17}, // 180cm in 17s = 10.6 cm/s
+        {160, 16}  // 160cm in 16s = 10 cm/s
+    };
+    
+    for (int i = 0; i < 5; i++) {
+        pkg.prev_reported_depth = operations[i][0];
+        pkg.prev_working_time = operations[i][1];
+        
+        double actual_speed = (double)operations[i][0] / operations[i][1];
+        
+        uint16_t new_estimate = update_speed_estimate_pre_operation(&pkg);
+        
+        // Test expected time calculation with new estimate
+        uint32_t expected_time = calculate_expected_time_ms(operations[i][0], new_estimate);
+        
+        ESP_LOGI(TAG, "Op %d: %dcm in %ds (%.1f cm/s actual) -> estimate: %.1f cm/s, expected time: %.1fs",
+               i+1, operations[i][0], operations[i][1], actual_speed,
+               new_estimate / 1000.0, expected_time / 1000.0);
+        
+        // Update for next iteration
+        pkg.prev_estimated_cm_per_s = new_estimate;
+    }
+    
+    // Final estimate should be reasonable (around 10-11 cm/s)
+    double final_estimate = pkg.prev_estimated_cm_per_s / 1000.0;
+    TEST_ASSERT(final_estimate > 9.0 && final_estimate < 12.0, "Final estimate should be in reasonable range");
+    
+    ESP_LOGI(TAG, "PASS: realistic scenario");
+    return true;
+}
+
+void run_all_tests() {
+    ESP_LOGI(TAG, "========== MOTOR CONTROLLER TEST SUITE ==========");
+    
+    int passed = 0;
+    int total = 0;
+    
+    // Test calculate_expected_time_ms
+    total++; if (test_calculate_expected_time_ms_normal_cases()) passed++;
+    total++; if (test_calculate_expected_time_ms_edge_cases()) passed++;
+    
+    // Test update_speed_estimate_pre_operation  
+    total++; if (test_update_speed_estimate_convergence()) passed++;
+    total++; if (test_update_speed_estimate_edge_cases()) passed++;
+    
+    // Integration test
+    total++; if (test_realistic_scenario()) passed++;
+    
+    ESP_LOGI(TAG, "========== TEST RESULTS ==========");
+    ESP_LOGI(TAG, "Passed: %d/%d tests", passed, total);
+    
+    if (passed == total) {
+        ESP_LOGI(TAG, "🎉 ALL TESTS PASSED! 🎉");
+    } else {
+        ESP_LOGE(TAG, "❌ Some tests failed. Check output above.");
+    }
+    ESP_LOGI(TAG, "=====================================");
+}
+
 // Initialize default packages
 static void init_default_packages(motorcontroller_pkg_t *lowering_pkg, motorcontroller_pkg_t *rising_pkg) {
     // Default LOWERING package (ALPHA_DEPTH)
     memset(lowering_pkg, 0, sizeof(motorcontroller_pkg_t));
     lowering_pkg->STATE = LOWERING;
     lowering_pkg->prev_working_time = 0;
-    lowering_pkg->rising_timeout_percent = 130;
+    lowering_pkg->rising_timeout_percent = 30;
     lowering_pkg->prev_reported_depth = 0;
     lowering_pkg->prev_end_depth = 0;
     lowering_pkg->prev_estimated_cm_per_s = 15000;  // 15 cm/s initially
     lowering_pkg->poll_type = ALPHA_DEPTH;
-    lowering_pkg->end_depth = 500;  // 5 meters
+    lowering_pkg->end_depth = 100;  // 5 meters
     lowering_pkg->samples = 3;
-    lowering_pkg->static_poll_interval_s = 10;
+    lowering_pkg->static_poll_interval_s = 1;
     lowering_pkg->alpha = 0.2;
     lowering_pkg->beta = 0.1;
     
@@ -41,13 +248,13 @@ static void init_default_packages(motorcontroller_pkg_t *lowering_pkg, motorcont
     rising_pkg->STATE = RISING;
     rising_pkg->prev_working_time = 0;
     rising_pkg->rising_timeout_percent = 130;
-    rising_pkg->prev_reported_depth = 500;
-    rising_pkg->prev_end_depth = 500;
+    rising_pkg->prev_reported_depth = 200;
+    rising_pkg->prev_end_depth = 100;
     rising_pkg->prev_estimated_cm_per_s = 15000;   // 1.8 cm/s initially (faster up)
     rising_pkg->poll_type = ALPHA_DEPTH;
-    rising_pkg->end_depth = 500;  // Home position
+    rising_pkg->end_depth = 100;  // start position when rising
     rising_pkg->samples = 3;
-    rising_pkg->static_poll_interval_s = 10;
+    rising_pkg->static_poll_interval_s = 1;
     rising_pkg->alpha = 0.2;
     rising_pkg->beta = 0.1;
 }
@@ -69,24 +276,24 @@ static void update_packages_after_operation(motorcontroller_pkg_t *pkg, const mo
 static void setup_static_depth_packages(motorcontroller_pkg_t *lowering_pkg, motorcontroller_pkg_t *rising_pkg) {
     // LOWERING with static points
     lowering_pkg->poll_type = STATIC_DEPTH;
-    lowering_pkg->end_depth = 800;  // 8 meters total
+    lowering_pkg->end_depth = 80;  // 8 meters total
     
     // Static points for lowering: 200cm, 400cm, 600cm, 800cm
-    lowering_pkg->static_points[0] = 200;  // 2m
-    lowering_pkg->static_points[1] = 400;  // 4m  
-    lowering_pkg->static_points[2] = 600;  // 6m
-    lowering_pkg->static_points[3] = 800;  // 8m
+    lowering_pkg->static_points[0] = 20;  // 2m
+    lowering_pkg->static_points[1] = 40;  // 4m  
+    lowering_pkg->static_points[2] = 60;  // 6m
+    lowering_pkg->static_points[3] = 80;  // 8m
     lowering_pkg->static_points[4] = 0;    // Terminator
     
     // RISING with static points (same points in reverse)
     rising_pkg->poll_type = STATIC_DEPTH;
     rising_pkg->end_depth = 0;     // Home position
-    rising_pkg->prev_reported_depth = 800; // Starting from bottom
+    rising_pkg->prev_reported_depth = 80; // Starting from bottom
     
     // Static points for rising: 600cm, 400cm, 200cm, then home
-    rising_pkg->static_points[0] = 600;    // 6m
-    rising_pkg->static_points[1] = 400;    // 4m
-    rising_pkg->static_points[2] = 200;    // 2m
+    rising_pkg->static_points[0] = 60;    // 6m
+    rising_pkg->static_points[1] = 40;    // 4m
+    rising_pkg->static_points[2] = 20;    // 2m
     rising_pkg->static_points[3] = 0;      // Terminator (then continue to home)
     
     ESP_LOGI(TAG, "Static depth packages configured - 4 points each direction");
@@ -145,7 +352,6 @@ void winch_main_task(void *pvParameters) {
         // ====================================================================
         ESP_LOGI(TAG, "Phase 1: LOWERING (ALPHA_DEPTH)");
         lowering_pkg.poll_type = ALPHA_DEPTH;
-        lowering_pkg.end_depth = 500;  // 5 meters
         
         loop1:
         ret = do_work(&lowering_pkg, &resp);
@@ -406,7 +612,8 @@ sleep:
 void app_main() {
 #ifdef MOTORCONTROLL_TEST
 
-    start_winch_main();
+    // start_winch_main();
+    run_all_tests();
 
     while (1) vTaskDelay(portMAX_DELAY);  // keep alive
 #else
