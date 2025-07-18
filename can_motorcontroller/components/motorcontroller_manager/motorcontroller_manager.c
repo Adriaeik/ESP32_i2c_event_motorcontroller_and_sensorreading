@@ -50,10 +50,10 @@ esp_err_t load_system_motorcontroller_pkg(motorcontroller_pkg_t *pkg, state_t ta
     }
     
     // Update for current operation
-    pkg->STATE = target_state;
+    pkg->STATE = target_state; // should be done beforehand maybe?
     
     // Validate package before returning
-    if (!validate_motorcontroller_pkg(pkg)) {
+    if (!validate_motorcontroller_pkg(pkg, target_state)) {
         ESP_LOGE(TAG, "Package validation failed");
         return ESP_ERR_INVALID_ARG;
     }
@@ -61,7 +61,9 @@ esp_err_t load_system_motorcontroller_pkg(motorcontroller_pkg_t *pkg, state_t ta
     print_motorcontroller_pkg_info(pkg, TAG);
     return ESP_OK;
 }
-
+uint16_t get_reported_depth(void){
+    return 1000;//dummy
+}
 esp_err_t update_and_store_pkg(motorcontroller_pkg_t *pkg, const motorcontroller_response_t *resp) {
     ESP_LOGI(TAG, "Updating package with response data");
     
@@ -69,22 +71,12 @@ esp_err_t update_and_store_pkg(motorcontroller_pkg_t *pkg, const motorcontroller
         return ESP_ERR_INVALID_ARG;
     }
     
-    // Apply alpha-beta filtering to update speed estimate
-    uint16_t new_speed = apply_manager_alpha_beta_filter(
-        pkg->prev_estimated_cm_per_s,
-        resp->working_time,
-        pkg->end_depth,
-        pkg->alpha,
-        pkg->beta
-    );
-    
     // Update package with response data
+    ESP_LOGI(TAG, "Speed updated: %d → %d cm/s", resp->estimated_cm_per_s, resp->estimated_cm_per_s);
     pkg->prev_working_time = resp->working_time;
-    pkg->prev_estimated_cm_per_s = new_speed;
-    pkg->prev_reported_depth = pkg->end_depth; // We reached the target depth
-    pkg->prev_end_depth = pkg->end_depth;
-    
-    ESP_LOGI(TAG, "Speed updated: %d → %d cm/s", resp->estimated_cm_per_s, new_speed);
+    pkg->prev_estimated_cm_per_s = resp->estimated_cm_per_s;
+    pkg->prev_reported_depth = get_reported_depth(); // must be updated by sensor 
+    pkg->prev_end_depth = pkg->end_depth; // should equal pkg->end_depth
     
     // Store to RTC based on state
     esp_err_t result = ESP_OK;
@@ -103,9 +95,9 @@ esp_err_t update_and_store_pkg(motorcontroller_pkg_t *pkg, const motorcontroller
     return result;
 }
 
-esp_err_t motorcontroller_manager_start_worker(void) {
+esp_err_t motorcontroller_manager_start_worker(state_t state) {
     ESP_LOGI(TAG, "Starting manager worker task");
-    
+    s_manager_ctx.target_state = state;
     if (s_manager_ctx.task_running) {
         ESP_LOGW(TAG, "Manager task already running");
         return ESP_ERR_INVALID_STATE;
@@ -185,7 +177,7 @@ esp_err_t motorcontroller_manager_wait_completion(uint32_t timeout_ms) {
 
 static void motorcontroller_manager_task(void *arg) {
     ESP_LOGI(TAG, "Manager task started");
-    
+
     xEventGroupSetBits(s_manager_ctx.event_group, MANAGER_TASK_STARTED_BIT);
     
     esp_err_t result = ESP_OK;
@@ -214,27 +206,20 @@ static void motorcontroller_manager_task(void *arg) {
     
     if (result == ESP_OK) {
         // 3. Calculate timeout based on package content
-        uint32_t estimated_time = calculate_operation_timeout(
-            s_manager_ctx.current_pkg.STATE,
-            s_manager_ctx.current_pkg.prev_estimated_cm_per_s,
-            s_manager_ctx.current_pkg.rising_timeout_percent,
-            s_manager_ctx.current_pkg.end_depth,
-            s_manager_ctx.current_pkg.static_points,
-            s_manager_ctx.current_pkg.samples,
-            s_manager_ctx.current_pkg.static_poll_interval_s
-        ) * 1000; // Convert to ms
-        
-        ESP_LOGI(TAG, "Calculated operation timeout: %d ms", estimated_time);
+        uint32_t worstcase_recovery_case_ms = (4*10)*1000; // add time to allow recovery sequenses to happen befor we call timeout
+        uint32_t estimated_timeout = calculate_operation_timeout_with_margin(&s_manager_ctx.current_pkg, 30/*30%*/) * 1000 + worstcase_recovery_case_ms; // Convert to ms
         
         // 4. Wait for response with calculated timeout
-        result = wait_for_worker(&s_manager_ctx.received_resp, estimated_time, estimated_time + 15000);
+        result = wait_for_worker(&s_manager_ctx.received_resp, 0, estimated_timeout);
         
         if (result == ESP_OK) {
             xEventGroupSetBits(s_manager_ctx.event_group, MANAGER_TASK_RESP_RECEIVED_BIT);
             ESP_LOGI(TAG, "Response received successfully");
             
             // 5. Update and store to RTC
+            print_motorcontroller_response_info(&s_manager_ctx.received_resp, TAG);
             result = update_and_store_pkg(&s_manager_ctx.current_pkg, &s_manager_ctx.received_resp);
+            // update and store it
             
             // Check if worker reported failure
             if (s_manager_ctx.received_resp.result != ESP_OK) {
@@ -277,29 +262,7 @@ esp_err_t load_or_init_motorcontroller_pkg(motorcontroller_pkg_t *pkg, state_t f
         result = rtc_load_motorcontroller_pkg_lowering(pkg);
     } else if (for_state == RISING) {
         result = rtc_load_motorcontroller_pkg_rising(pkg);
-    }
-    
-    if (result != ESP_OK) {
-        // Initialize with defaults if no valid data in RTC
-        ESP_LOGI(TAG, "No valid RTC data, initializing with defaults");
-        motorcontroller_pkg_init_default(pkg);
-        
-        // Set state-specific defaults
-        if (for_state == LOWERING) {
-            pkg->STATE = LOWERING;
-            pkg->end_depth = 500; // Default 5m depth
-        } else if (for_state == RISING) {
-            pkg->STATE = RISING;
-            pkg->end_depth = 0; // Rise to surface
-        } else {
-            pkg->STATE = INIT;
-            pkg->end_depth = 0;
-        }
-        pkg->STATE = LOWERING; // remove this!
-        
-        result = ESP_OK; // Default initialization succeeded
-    }
-    
+    } // ad a init case too!!    
     return result;
 }
 
@@ -335,18 +298,7 @@ uint16_t apply_manager_alpha_beta_filter(uint16_t prev_estimate,
     return result;
 }
 
-bool validate_motorcontroller_pkg(const motorcontroller_pkg_t *pkg) {
-    if (!pkg) {
-        ESP_LOGE(TAG, "NULL package pointer");
-        return false;
-    }
-    
-    // Use existing validation function
-    bool valid = is_motorcontroller_pkg_valid(pkg);
-    
-    if (!valid) {
-        ESP_LOGE(TAG, "Package validation failed");
-    }
-    
-    return valid;
+bool validate_motorcontroller_pkg(const motorcontroller_pkg_t *pkg, state_t state) {
+    // Use existing common validation function    
+    return is_motorcontroller_pkg_valid(pkg, state);
 }

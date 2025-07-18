@@ -96,15 +96,13 @@ void manager_task(void *arg){
         
         // Wait for response (with estimated timeout offset)
         motorcontroller_response_t resp;
-        uint32_t estimated_time = calculate_operation_timeout(
-            pkg.STATE, pkg.prev_estimated_cm_per_s, pkg.rising_timeout_percent,
-            pkg.end_depth, pkg.static_points, pkg.samples, pkg.static_poll_interval_s
-        ) * 1000;  // Convert to ms
+        uint32_t estimated_time = calculate_operation_timeout(&pkg) * 1000;  // Convert to ms
         
         ret = wait_for_worker(&resp, estimated_time, estimated_time + 10000);
         if (ret == ESP_OK) {
             ESP_LOGI(TAG, "Received response: result=%s, time=%ds", 
                     esp_err_to_name(resp.result), resp.working_time);
+            
         } else {
             ESP_LOGE(TAG, "Failed to get response: %s", esp_err_to_name(ret));
         }

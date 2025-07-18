@@ -29,7 +29,7 @@ esp_err_t update_and_store_pkg(motorcontroller_pkg_t *pkg, const motorcontroller
  * @brief Start manager background task
  * @return ESP_OK on success
  */
-esp_err_t motorcontroller_manager_start_worker(void);
+esp_err_t motorcontroller_manager_start_worker(state_t state);
 
 /**
  * @brief Wait for manager task completion
@@ -68,7 +68,7 @@ uint16_t apply_manager_alpha_beta_filter(uint16_t prev_estimate,
  * @param pkg Package to validate
  * @return true if valid, false otherwise
  */
-bool validate_motorcontroller_pkg(const motorcontroller_pkg_t *pkg);
+bool validate_motorcontroller_pkg(const motorcontroller_pkg_t *pkg, state_t state);
 
 #ifdef __cplusplus
 }

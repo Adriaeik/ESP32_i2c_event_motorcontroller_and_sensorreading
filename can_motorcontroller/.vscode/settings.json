@@ -55,5 +55,5 @@
     "rtc_manager.h": "c"
   },
   "idf.flashType": "UART",
-  "idf.portWin": "COM15"
+  "idf.portWin": "COM10"
 }

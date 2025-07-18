@@ -14,14 +14,14 @@ const fragment_ids_t MANAGER_TO_WORKER_IDS = {
     .start_id = CAN_ID_MOTCTRL_PKG_START,
     .data_id = CAN_ID_MOTCTRL_PKG_DATA,
     .end_id = CAN_ID_MOTCTRL_PKG_END,
-    .ack_id = CAN_ID_MOTCTRL_PKG_ACK
+    .ack_id = CAN_ID_MOTCTRL_RESP_ACK
 };
 
 const fragment_ids_t WORKER_TO_MANAGER_IDS = {
     .start_id = CAN_ID_MOTCTRL_RESP_START,
     .data_id = CAN_ID_MOTCTRL_RESP_DATA,
     .end_id = CAN_ID_MOTCTRL_RESP_END,
-    .ack_id = CAN_ID_MOTCTRL_RESP_ACK
+    .ack_id = CAN_ID_MOTCTRL_PKG_ACK
 };
 
 typedef enum {

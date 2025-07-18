@@ -24,7 +24,7 @@ extern "C" {
 #define CAN_ID_MOTCTRL_RESP_DATA    0x106   // Response data frames
 #define CAN_ID_MOTCTRL_RESP_END     0x107   // Response end frame
 #define CAN_ID_MOTCTRL_RESP_ACK     0x108   // 
-#define CAN_ID_MOTCTRL_PKG_ACK      0x108   // 
+#define CAN_ID_MOTCTRL_PKG_ACK      0x109   // 
 
 // Operation timeouts (use config values with fallbacks)
 #ifdef CONFIG_CAN_MOTCTRL_DEFAULT_TIMEOUT_SEC
@@ -32,7 +32,7 @@ extern "C" {
 #else
     #define CAN_MOTCTRL_DEFAULT_TIMEOUT     30
 #endif
-#define CAN_ACK_TIMEOUT_MS 100  // CAN_MOTCTRL_DEFAULT_TIMEOUT
+#define CAN_ACK_TIMEOUT_MS 500  // CAN_MOTCTRL_DEFAULT_TIMEOUT
 
 #ifdef CONFIG_CAN_MOTCTRL_MIN_TIMEOUT_SEC
     #define CAN_MOTCTRL_MIN_TIMEOUT         CONFIG_CAN_MOTCTRL_MIN_TIMEOUT_SEC
@@ -88,34 +88,43 @@ typedef enum {
  * @param static_poll_interval_s Interval between samples
  * @return Calculated timeout in seconds
  */
-int calculate_operation_timeout(state_t state, 
-                               uint16_t prev_estimated_cm_per_s,
-                               int rising_timeout_percent,
-                               uint16_t end_depth,
-                               const uint16_t *static_points,
-                               uint16_t samples,
-                               uint16_t static_poll_interval_s);
 
-/**
- * @brief Get string representation of motor controller state
- * @param state State to convert
- * @return String representation
+ /**
+ * @brief Calculate operation timeout based on package parameters
+ * 
+ * @param pkg Motor controller package containing operation parameters
+ * @return Estimated timeout in seconds
+ * 
+ * Calculation rules:
+ * - LIN_TIME: static_poll_interval_s
+ * - ALPHA_DEPTH: end_depth / (prev_estimated_cm_per_s / 1000)  [time = distance / speed]
+ * - STATIC_DEPTH: number_of_points * (travel_time + static_wait_time)
+ *   where travel_time = end_depth / (prev_estimated_cm_per_s / 1000)
+ *   and static_wait_time = samples * (static_poll_interval_s + OFFSET)
  */
-const char* state_to_string(state_t state);
+uint32_t calculate_operation_timeout(const motorcontroller_pkg_t *pkg);
 
 /**
- * @brief Get string representation of worker status
- * @param status Status to convert  
- * @return String representation
+ * @brief Calculate operation timeout with additional safety margin
+ * 
+ * @param pkg Motor controller package
+ * @param safety_margin_percent Additional safety margin (e.g., 30 for 30% extra time)
+ * @return Timeout with safety margin in milliseconds
  */
-const char* get_worker_status_string(worker_status_t status);
+uint32_t calculate_operation_timeout_with_margin(const motorcontroller_pkg_t *pkg, 
+                                                uint8_t safety_margin_percent);
+
 
 /**
- * @brief Check if motor controller package is valid
+ * @brief Validates motorcontroller package parameters
+ * 
+ * SCALING NOTE: prev_estimated_cm_per_s is scaled (10000 => 10.000 cm/s)
+ * 
  * @param pkg Package to validate
+ * @param expected_state Expected state for this package
  * @return true if valid, false otherwise
  */
-bool is_motorcontroller_pkg_valid(const motorcontroller_pkg_t *pkg);
+bool is_motorcontroller_pkg_valid(const motorcontroller_pkg_t *pkg, state_t expected_state);
 
 /**
  * @brief Print motor controller package information (for debugging)
@@ -130,6 +139,13 @@ void print_motorcontroller_pkg_info(const motorcontroller_pkg_t *pkg, const char
  * @param tag Log tag to use
  */
 void print_motorcontroller_response_info(const motorcontroller_response_t *resp, const char *tag);
+
+/**
+ * @brief Get string representation of worker status
+ * @param status Status to convert  
+ * @return String representation
+ */
+const char* get_worker_status_string(worker_status_t status);
 
 #ifdef __cplusplus
 }
