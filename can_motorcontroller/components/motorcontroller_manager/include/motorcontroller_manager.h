@@ -38,37 +38,9 @@ esp_err_t motorcontroller_manager_start_worker(state_t state);
  */
 esp_err_t motorcontroller_manager_wait_completion(uint32_t timeout_ms);
 
-// === Helper Functions (Internal) ===
+esp_err_t update_reported_depth(float depth_meters);
 
-/**
- * @brief Load motorcontroller package from RTC or initialize with defaults
- * @param pkg Output package
- * @param for_state Load package for specific state (LOWERING/RISING have separate estimates)
- * @return ESP_OK on success, ESP_FAIL if no valid data (will use defaults)
- */
-esp_err_t load_or_init_motorcontroller_pkg(motorcontroller_pkg_t *pkg, state_t for_state);
 
-/**
- * @brief Apply alpha-beta filtering to update speed estimate
- * @param prev_estimate Previous speed estimate (cm/s)
- * @param actual_time Actual time taken (seconds)
- * @param distance Distance traveled (cm)
- * @param alpha Alpha filter coefficient
- * @param beta Beta filter coefficient
- * @return Updated speed estimate (cm/s)
- */
-uint16_t apply_manager_alpha_beta_filter(uint16_t prev_estimate, 
-                                        int actual_time, 
-                                        uint16_t distance,
-                                        double alpha, 
-                                        double beta);
-
-/**
- * @brief Validate motorcontroller package before sending
- * @param pkg Package to validate
- * @return true if valid, false otherwise
- */
-bool validate_motorcontroller_pkg(const motorcontroller_pkg_t *pkg, state_t state);
 
 #ifdef __cplusplus
 }

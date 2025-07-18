@@ -121,6 +121,14 @@ static uint16_t simulate_depth_after_operation(const motorcontroller_pkg_t *pkg,
 
 #ifdef ROLE_MANAGER
 #include "motorcontroller_manager.h"
+#include "esp_random.h"
+static float random_float_range(float min, float max)
+{
+    // esp_random() returns 32‑bit tilfeldig
+    uint32_t r = esp_random();
+    float t = (float)r / (float)UINT32_MAX;  // normalisert [0,1]
+    return min + t * (max - min);
+}
 
 void manager_main_task(void *arg) {
     ESP_LOGI(TAG, "Manager main task started");
@@ -171,6 +179,9 @@ void manager_main_task(void *arg) {
         ESP_LOGW(TAG,"================================================================");
         printf("\n\n\n");
         can_bus_manager_deinit();
+        float depth = random_float_range(3.0f, 5.0f);
+        ESP_LOGI(TAG,"reported depth: %.2f", depth);
+        update_reported_depth(depth);
         vTaskDelay(pdMS_TO_TICKS(5000)); // Long pause between full cycles
     }
 }

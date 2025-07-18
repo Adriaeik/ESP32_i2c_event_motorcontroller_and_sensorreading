@@ -303,10 +303,6 @@ void print_motorcontroller_pkg_info(const motorcontroller_pkg_t *pkg, const char
     // Validation
     bool valid = is_motorcontroller_pkg_valid(pkg, pkg->STATE);
     ESP_LOGI(tag, "  Validation: %s", valid ? "VALID" : "INVALID");
-    
-    // Calculate estimated timeout
-    int timeout = calculate_operation_timeout(pkg);
-    ESP_LOGI(tag, "  Estimated Timeout: %d seconds", timeout);
 }
 
 void print_motorcontroller_response_info(const motorcontroller_response_t *resp, const char *tag)

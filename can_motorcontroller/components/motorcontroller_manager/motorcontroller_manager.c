@@ -3,10 +3,13 @@
 #include "can_motctrl_common.h"
 #include "RTC_manager.h"
 #include "esp_log.h"
+#include "esp_err.h"
+#include "esp_check.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
 #include <string.h>
+
 
 static const char *TAG = "motorcontroller_manager";
 
@@ -37,11 +40,27 @@ static ManagerContext s_manager_ctx = {0};
 
 // Forward declarations
 static void motorcontroller_manager_task(void *arg);
+// === Helper Functions (Internal) ===
+
+/**
+ * @brief Load motorcontroller package from RTC or initialize with defaults
+ * @param pkg Output package
+ * @param for_state Load package for specific state (LOWERING/RISING have separate estimates)
+ * @return ESP_OK on success, ESP_FAIL if no valid data (will use defaults)
+ */
+esp_err_t load_state_motorcontroller_pkg(motorcontroller_pkg_t *pkg, state_t for_state);
+
+/**
+ * @brief Validate motorcontroller package before sending
+ * @param pkg Package to validate
+ * @return true if valid, false otherwise
+ */
+bool validate_motorcontroller_pkg(const motorcontroller_pkg_t *pkg, state_t state);
 
 esp_err_t load_system_motorcontroller_pkg(motorcontroller_pkg_t *pkg, state_t target_state) {
     ESP_LOGI(TAG, "Loading system motorcontroller package for state: %s", state_to_string(target_state));
     
-    esp_err_t result = load_or_init_motorcontroller_pkg(pkg, target_state);
+    esp_err_t result = load_state_motorcontroller_pkg(pkg, target_state);
     
     if (result == ESP_OK) {
         ESP_LOGI(TAG, "Package loaded successfully from RTC");
@@ -61,9 +80,33 @@ esp_err_t load_system_motorcontroller_pkg(motorcontroller_pkg_t *pkg, state_t ta
     print_motorcontroller_pkg_info(pkg, TAG);
     return ESP_OK;
 }
-uint16_t get_reported_depth(void){
-    return 1000;//dummy
+
+/**
+ * @brief Set the depth reached to both rising and lowering and store to RTC
+ *
+ * This updates both the rising and lowering motorcontroller packages'
+ * prev_reported_depth fields in centimeters, saving them to RTC
+ *
+ * @param depth_meters  Depth in meters; must be > 0
+ * @return ESP_OK on success, or an error code on failure
+ */
+esp_err_t update_reported_depth(float depth_meters) {
+    uint16_t depth_cm = (uint16_t)(depth_meters * 100.0f);
+    if (depth_cm == 0) return ESP_ERR_INVALID_STATE;
+
+    motorcontroller_pkg_t lowering_pkg, rising_pkg;
+    ESP_RETURN_ON_ERROR(rtc_load_motorcontroller_pkg_lowering(&lowering_pkg), TAG, "failed to load lowering_pkg");
+    ESP_RETURN_ON_ERROR(rtc_load_motorcontroller_pkg_rising(&rising_pkg),   TAG, "failed to load rising_pkg");
+
+    lowering_pkg.prev_reported_depth = depth_cm;
+    rising_pkg.prev_reported_depth   = depth_cm;
+
+    ESP_RETURN_ON_ERROR(rtc_save_motorcontroller_pkg_lowering(&lowering_pkg), TAG, "failed to store lowering_pkg");
+    ESP_RETURN_ON_ERROR(rtc_save_motorcontroller_pkg_rising(&rising_pkg),     TAG, "failed to store rising_pkg");
+
+    return ESP_OK;
 }
+
 esp_err_t update_and_store_pkg(motorcontroller_pkg_t *pkg, const motorcontroller_response_t *resp) {
     ESP_LOGI(TAG, "Updating package with response data");
     
@@ -72,11 +115,10 @@ esp_err_t update_and_store_pkg(motorcontroller_pkg_t *pkg, const motorcontroller
     }
     
     // Update package with response data
-    ESP_LOGI(TAG, "Speed updated:  %.2f → %.2f cm/s", (float)pkg->prev_estimated_cm_per_s/1000.0, (float)resp->estimated_cm_per_s/1000.0);
     pkg->prev_working_time = resp->working_time;
-    pkg->prev_estimated_cm_per_s = resp->estimated_cm_per_s;
-    pkg->prev_reported_depth = get_reported_depth(); // must be updated by sensor 
-    pkg->prev_end_depth = pkg->end_depth; // should equal pkg->end_depth
+    // all these should be the same .. maybe create som checks?
+    // pkg->prev_estimated_cm_per_s = resp->estimated_cm_per_s; 
+    // pkg->prev_end_depth = pkg->end_depth; // should equal pkg->end_depth
     
     // Store to RTC based on state
     esp_err_t result = ESP_OK;
@@ -175,18 +217,71 @@ esp_err_t motorcontroller_manager_wait_completion(uint32_t timeout_ms) {
     }
 }
 
+
+uint16_t update_speed_estimate(const motorcontroller_pkg_t *pkg) {
+    // Start with previous estimate - fallback
+    uint16_t prev_speed_estimate = pkg->prev_estimated_cm_per_s;
+    
+    // If we have previous operation data, update speed estimate
+    if (prev_speed_estimate > 0 && pkg->prev_reported_depth > 0) {
+        
+        double actual_distance_cm = (double)pkg->prev_reported_depth;
+        double actual_time_s = (double)pkg->prev_working_time;
+        
+        if (actual_time_s > 0.1 && actual_distance_cm > 0) {
+            // Calculate measured speed from last operation
+            double measured_speed_cm_per_s = actual_distance_cm / actual_time_s;
+            double previous_speed_cm_per_s = (double)pkg->prev_estimated_cm_per_s / 1000.0;
+            
+            // Use exponential moving average instead of alpha-beta filter
+            // alpha acts as the learning rate (0.0 = no update, 1.0 = full replacement)
+            double updated_speed = previous_speed_cm_per_s * (1.0 - pkg->alpha) + 
+                                 measured_speed_cm_per_s * pkg->alpha;
+            
+            // Convert back to scaled format
+            uint16_t new_estimate = (uint16_t)(updated_speed * 1000.0);
+            
+            if (new_estimate > 0 && new_estimate < 50000) {
+                ESP_LOGI(TAG, "Speed estimate updated: %.2f -> %.2f cm/s (measured: %.1f cm/s, distance: %.0f cm, time: %.1f s)", 
+                         previous_speed_cm_per_s, updated_speed, measured_speed_cm_per_s,
+                         actual_distance_cm, actual_time_s);
+                return new_estimate;
+            } else {
+                ESP_LOGW(TAG, "Speed estimate rejected (out of range): %.1f cm/s", 
+                         updated_speed);
+                return 0; // fail
+            }
+        }
+    }
+    return prev_speed_estimate;
+}
+
+esp_err_t update_and_save_speed_estimate(motorcontroller_pkg_t *pkg){
+    uint16_t speed_estimate = update_speed_estimate(pkg);
+    if (speed_estimate>0){
+        pkg->prev_estimated_cm_per_s = speed_estimate;
+        if (pkg->STATE == LOWERING) {
+            return rtc_save_motorcontroller_pkg_lowering(pkg);
+        } else if (pkg->STATE == RISING) {
+            return rtc_save_motorcontroller_pkg_rising(pkg);
+        }
+    }
+    return ESP_FAIL;
+}
+
 static void motorcontroller_manager_task(void *arg) {
     ESP_LOGI(TAG, "Manager task started");
 
     xEventGroupSetBits(s_manager_ctx.event_group, MANAGER_TASK_STARTED_BIT);
-    
     esp_err_t result = ESP_OK;
     
     // 1. Load package from RTC
     result = load_system_motorcontroller_pkg(&s_manager_ctx.current_pkg, s_manager_ctx.target_state);
-    
+    // calculate and update speed estimate
     if (result == ESP_OK) {
         // 2. Send to worker via CAN
+        result = update_and_save_speed_estimate(&s_manager_ctx.current_pkg); // updates and stores speed change to RTC
+        // call for - wait untill worktime function before sending maybe..? it not that critical tho.
         ESP_LOGI(TAG, "Sending package to worker");
         result = start_worker(&s_manager_ctx.current_pkg, 5000);
         
@@ -206,15 +301,14 @@ static void motorcontroller_manager_task(void *arg) {
     
     if (result == ESP_OK) {
         // 3. Calculate timeout based on package content
-        uint32_t worstcase_recovery_case_ms = (4*15)*1000; // add time to allow recovery sequenses to happen befor we call timeout
-        uint32_t estimated_timeout = calculate_operation_timeout_with_margin(&s_manager_ctx.current_pkg, 30/*30%*/) * 1000 + worstcase_recovery_case_ms; // Convert to ms
+        uint32_t worstcase_recovery_case_ms = (4*15)*1000; // add time to allow recovery sequenses to happen befor we call it a timeout
+        uint32_t estimated_timeout = calculate_operation_timeout_with_margin(&s_manager_ctx.current_pkg, 
+                                                            s_manager_ctx.current_pkg.rising_timeout_percent) 
+                                                            * 1000 + worstcase_recovery_case_ms; // Convert to ms
         
-        // 4. Wait for response with calculated timeout
+        // 4. Wait for response with calculated timeout/ can have offset, but it soo good we dont need to!
         result = wait_for_worker(&s_manager_ctx.received_resp, 0, estimated_timeout);
-        
-        if (result == ESP_OK) {
-            
-            
+        if (result == ESP_OK) {            
             // 5. Update and store to RTC
             print_motorcontroller_response_info(&s_manager_ctx.received_resp, TAG);
             result = update_and_store_pkg(&s_manager_ctx.current_pkg, &s_manager_ctx.received_resp);
@@ -251,7 +345,7 @@ cleanup:
 
 // Helper function implementations
 
-esp_err_t load_or_init_motorcontroller_pkg(motorcontroller_pkg_t *pkg, state_t for_state) {
+esp_err_t load_state_motorcontroller_pkg(motorcontroller_pkg_t *pkg, state_t for_state) {
     if (!pkg) {
         return ESP_ERR_INVALID_ARG;
     }

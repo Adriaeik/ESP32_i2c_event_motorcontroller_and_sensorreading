@@ -905,39 +905,8 @@ uint32_t calculate_expected_time_ms(uint16_t distance_cm, uint16_t speed_cm_per_
 }
 
 uint16_t update_speed_estimate_pre_operation(const motorcontroller_pkg_t *pkg) {
-    // Start with previous estimate - fallback
+    // Start with previous estimate - fallback - calculation is moved to the manager
     g_op_state.updated_speed_estimate = pkg->prev_estimated_cm_per_s;
-    
-    // If we have previous operation data, update speed estimate
-    if (pkg->prev_working_time > 0 && pkg->prev_reported_depth > 0) {
-        
-        double actual_distance_cm = (double)pkg->prev_reported_depth;
-        double actual_time_s = (double)pkg->prev_working_time;
-        
-        if (actual_time_s > 0.1 && actual_distance_cm > 0) {
-            // Calculate measured speed from last operation
-            double measured_speed_cm_per_s = actual_distance_cm / actual_time_s;
-            double previous_speed_cm_per_s = (double)pkg->prev_estimated_cm_per_s / 1000.0;
-            
-            // Use exponential moving average instead of alpha-beta filter
-            // alpha acts as the learning rate (0.0 = no update, 1.0 = full replacement)
-            double updated_speed = previous_speed_cm_per_s * (1.0 - pkg->alpha) + 
-                                 measured_speed_cm_per_s * pkg->alpha;
-            
-            // Convert back to scaled format
-            uint16_t new_estimate = (uint16_t)(updated_speed * 1000.0);
-            
-            if (new_estimate > 0 && new_estimate < 50000) {
-                g_op_state.updated_speed_estimate = new_estimate;
-                ESP_LOGI(TAG, "Speed estimate updated: %.1f -> %.1f cm/s (measured: %.1f cm/s, distance: %.0f cm, time: %.1f s)", 
-                         previous_speed_cm_per_s, updated_speed, measured_speed_cm_per_s,
-                         actual_distance_cm, actual_time_s);
-            } else {
-                ESP_LOGW(TAG, "Speed estimate rejected (out of range): %.1f cm/s", 
-                         updated_speed);
-            }
-        }
-    }
     return g_op_state.updated_speed_estimate;
 }
 
