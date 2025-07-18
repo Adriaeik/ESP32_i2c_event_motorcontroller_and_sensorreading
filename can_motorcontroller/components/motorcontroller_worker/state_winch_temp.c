@@ -246,7 +246,7 @@ static winch_state_t transition_to_state(winch_state_t new_state) {
 }
 
 static winch_state_t process_event(winch_event_t event) {
-    ESP_LOGD(TAG, "Processing event %s in state %s", 
+    ESP_LOGI(TAG, "Processing event %s in state %s", 
              event_name(event), state_name(g_ctx.current_state));
     
     if (state_handlers[g_ctx.current_state].on_event) {
@@ -605,6 +605,7 @@ esp_err_t winch_controller_init(void) {
     // Initialize hardware
     outputs_init();
     
+    memset(&g_ctx, 0, sizeof(winch_state_context_t));
     // Create event queue  
     g_ctx.event_queue = xQueueCreate(10, sizeof(InputEvent));
     if (!g_ctx.event_queue) {
@@ -614,7 +615,6 @@ esp_err_t winch_controller_init(void) {
     inputs_init(g_ctx.event_queue);
     
     // Initialize state machine
-    memset(&g_ctx, 0, sizeof(winch_state_context_t));
     g_ctx.event_queue = g_ctx.event_queue; // Preserve queue handle
     g_ctx.current_state = WS_IDLE;
     g_ctx.current_direction = WINCH_INVALID;
@@ -659,7 +659,7 @@ esp_err_t winch_execute_operation(const motorcontroller_pkg_t *pkg, motorcontrol
     
     g_ctx.current_pkg = pkg;
     g_ctx.current_resp = resp;
-    g_ctx.updated_speed_estimate = update_speed_estimate_pre_operation(pkg);
+    g_ctx.updated_speed_estimate = pkg->prev_estimated_cm_per_s;
     g_ctx.operation_active = true;
     g_ctx.recovery_attempts = 0;
     g_ctx.current_static_point = 0;
@@ -714,7 +714,7 @@ static winch_state_t timeout_recovery_up_event(winch_state_context_t *ctx, winch
             
         case WE_TIMEOUT:
             // Recovery failed, try again or give up
-            if (ctx->recovery_attempts >= 3) {
+            if (ctx->recovery_attempts >= 3) { //macic number use define
                 ESP_LOGE(TAG, "Max recovery attempts reached");
                 return WS_ERROR;
             }
