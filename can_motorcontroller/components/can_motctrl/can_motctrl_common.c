@@ -284,7 +284,7 @@ void print_motorcontroller_pkg_info(const motorcontroller_pkg_t *pkg, const char
     ESP_LOGI(tag, "  Poll Type: %s", pkg->poll_type == STATIC_DEPTH ? "STATIC" : "ALPHA_DEPTH");
     ESP_LOGI(tag, "  Samples: %d", pkg->samples);
     ESP_LOGI(tag, "  Poll Interval: %d seconds", pkg->static_poll_interval_s);
-    ESP_LOGI(tag, "  Previous Speed: %d cm/s", pkg->prev_estimated_cm_per_s);
+    ESP_LOGI(tag, "  Previous Speed: %d cm/s", pkg->prev_estimated_cm_per_s/1000);
     ESP_LOGI(tag, "  Previous Work Time: %d seconds", pkg->prev_working_time);
     ESP_LOGI(tag, "  Rising Timeout: %d%%", pkg->rising_timeout_percent);
     ESP_LOGI(tag, "  Filter: α=%.3f, β=%.3f", pkg->alpha, pkg->beta);
@@ -319,13 +319,7 @@ void print_motorcontroller_response_info(const motorcontroller_response_t *resp,
     ESP_LOGI(tag, "  State: %s", state_to_string(resp->STATE));
     ESP_LOGI(tag, "  Result: %s (%d)", esp_err_to_name(resp->result), resp->result);
     ESP_LOGI(tag, "  Working Time: %d seconds", resp->working_time);
-    ESP_LOGI(tag, "  Estimated Speed: %d cm/s", resp->estimated_cm_per_s);
-    
-    // Calculate some derived information
-    if (resp->working_time > 0) {
-        ESP_LOGI(tag, "  Performance: %.1f cm/s average", 
-                (float)resp->estimated_cm_per_s);
-    }
+    ESP_LOGI(tag, "  Estimated Speed: %d cm/s", resp->estimated_cm_per_s/1000);
     
     // Status interpretation
     if (resp->result == ESP_OK) {

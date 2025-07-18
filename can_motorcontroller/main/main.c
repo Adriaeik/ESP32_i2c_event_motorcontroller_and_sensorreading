@@ -31,25 +31,25 @@ static void init_default_packages(motorcontroller_pkg_t *lowering_pkg, motorcont
     lowering_pkg->prev_end_depth = 0;
     lowering_pkg->prev_estimated_cm_per_s = 15000;  // 15 cm/s initially
     lowering_pkg->poll_type = ALPHA_DEPTH;
-    lowering_pkg->end_depth = 300;  // 5 meters
+    lowering_pkg->end_depth = 300;  // 3 meters
     lowering_pkg->samples = 3;
     lowering_pkg->static_poll_interval_s = 1;
-    lowering_pkg->alpha = 0.2;
+    lowering_pkg->alpha = 0.9;
     lowering_pkg->beta = 0.1;
     
     // Default RISING package (ALPHA_DEPTH)
     memset(rising_pkg, 0, sizeof(motorcontroller_pkg_t));
     rising_pkg->STATE = RISING;
     rising_pkg->prev_working_time = 20;
-    rising_pkg->rising_timeout_percent = 130;
-    rising_pkg->prev_reported_depth = 200;
+    rising_pkg->rising_timeout_percent = 30;
+    rising_pkg->prev_reported_depth = 300;
     rising_pkg->prev_end_depth = 300;
-    rising_pkg->prev_estimated_cm_per_s = 1500;   // 1.8 cm/s initially (faster up)
+    rising_pkg->prev_estimated_cm_per_s = 15000;   // 1.8 cm/s initially (faster up)
     rising_pkg->poll_type = ALPHA_DEPTH;
     rising_pkg->end_depth = 300;  // start position when rising
     rising_pkg->samples = 3;
     rising_pkg->static_poll_interval_s = 1;
-    rising_pkg->alpha = 0.2;
+    rising_pkg->alpha = 0.9;
     rising_pkg->beta = 0.1;
 }
 
@@ -128,41 +128,36 @@ void manager_main_task(void *arg) {
     
     motorcontroller_pkg_t lowering_pkg, rising_pkg;
     esp_err_t ret;
+        init_default_packages(&lowering_pkg, &rising_pkg);
+        rtc_save_motorcontroller_pkg_lowering(&lowering_pkg);
+        rtc_save_motorcontroller_pkg_rising(&rising_pkg);
+        
 
     uint32_t cycle_count = 0;
-    
+    state_t state = INIT;
     while (1) {
+        switch (state)
+        {
+        case LOWERING:
+            state = RISING;
+            break;
+        
+        default:
+            state = LOWERING;
+            break;
+        }
         cycle_count++;
+
         ESP_LOGI(TAG, "=== Starting Cycle #%d ===", cycle_count);
         
         // Initialize CAN bus for everyone to use
         ESP_ERROR_CHECK(can_bus_manager_init());
-        // Initialize default packages
-        init_default_packages(&lowering_pkg, &rising_pkg);
-        rtc_save_motorcontroller_pkg_lowering(&lowering_pkg);
-        rtc_save_motorcontroller_pkg_rising(&rising_pkg);
 
-        // ====================================================================
-        // PHASE 1: LOWERING (ALPHA_DEPTH)
-        // ====================================================================
-        ESP_LOGI(TAG, " ======================= Phase 1: LOWERING (ALPHA_DEPTH) ======================= ");
-        lowering_pkg.poll_type = ALPHA_DEPTH;
-        
-        loop1:
-        // Save lowering package to RTC
-        ret = rtc_save_motorcontroller_pkg_lowering(&lowering_pkg);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to save lowering package: %s", esp_err_to_name(ret));
-            vTaskDelay(pdMS_TO_TICKS(2000));
-            goto loop1;
-        }
-        
         // Start manager worker task (non-blocking)
-        ret = motorcontroller_manager_start_worker(LOWERING);
+        ret = motorcontroller_manager_start_worker(state); // maybe make this retur/modify a timout to use also + starttick -> then call motorcontroller_manager_wait_completion(start_tick,wait_ticks); so it behaves lig wait until..
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to start manager worker: %s", esp_err_to_name(ret));
             vTaskDelay(pdMS_TO_TICKS(2000));
-            goto loop1;
         }
         
         // Wait for completion (high timeout, will return when worker responds)
@@ -170,130 +165,12 @@ void manager_main_task(void *arg) {
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Phase 1 failed: %s", esp_err_to_name(ret));
             vTaskDelay(pdMS_TO_TICKS(2000));
-            goto loop1;
         }
-        
-        // Package updated automatically by background task
-        // Reload updated packages from RTC
-        rtc_load_motorcontroller_pkg_lowering(&lowering_pkg);
-        rtc_load_motorcontroller_pkg_rising(&rising_pkg);
-        
-        vTaskDelay(pdMS_TO_TICKS(1000)); // Brief pause
-        
-        // ====================================================================
-        // PHASE 2: RISING (ALPHA_DEPTH)
-        // ====================================================================
-        ESP_LOGI(TAG, " ======================= Phase 2: RISING (ALPHA_DEPTH) =======================");
-        rising_pkg.poll_type = ALPHA_DEPTH;
-        ESP_LOGI(TAG, "depth %d", rising_pkg.end_depth);
-        
-        loop2:
-        // Save rising package to RTC
-        ret = rtc_save_motorcontroller_pkg_rising(&rising_pkg);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to save rising package: %s", esp_err_to_name(ret));
-            vTaskDelay(pdMS_TO_TICKS(2000));
-            goto loop2;
-        }
-        
-        // Start manager worker task (non-blocking)
-        ret = motorcontroller_manager_start_worker(RISING);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to start manager worker: %s", esp_err_to_name(ret));
-            vTaskDelay(pdMS_TO_TICKS(2000));
-            goto loop2;
-        }
-        
-        // Wait for completion (high timeout, will return when worker responds)
-        ret = motorcontroller_manager_wait_completion(300000); // 5 minutes timeout
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Phase 2 failed: %s", esp_err_to_name(ret));
-            vTaskDelay(pdMS_TO_TICKS(2000));
-            goto loop2;
-        }
-        
-        // Package updated automatically by background task
-        // Reload updated packages from RTC
-        rtc_load_motorcontroller_pkg_rising(&rising_pkg);
-        rtc_load_motorcontroller_pkg_lowering(&lowering_pkg);
-        
-        vTaskDelay(pdMS_TO_TICKS(3000)); // Longer pause between cycles
-        
-        // ====================================================================
-        // PHASE 3: LOWERING (STATIC_DEPTH)
-        // ====================================================================
-        ESP_LOGI(TAG, " ======================= Phase 3: LOWERING (STATIC_DEPTH) ======================= ");
-        setup_static_depth_packages(&lowering_pkg, &rising_pkg);
-        ret = rtc_save_motorcontroller_pkg_lowering(&lowering_pkg);
-        
-        loop3:
-        // Save lowering package to RTC
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to save lowering package: %s", esp_err_to_name(ret));
-            vTaskDelay(pdMS_TO_TICKS(2000));
-            goto loop3;
-        }
-        
-        // Start manager worker task (non-blocking)
-        ret = motorcontroller_manager_start_worker(LOWERING);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to start manager worker: %s", esp_err_to_name(ret));
-            vTaskDelay(pdMS_TO_TICKS(2000));
-            goto loop3;
-        }
-        
-        // Wait for completion (high timeout, will return when worker responds)
-        ret = motorcontroller_manager_wait_completion(300000); // 5 minutes timeout
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Phase 3 failed: %s", esp_err_to_name(ret));
-            vTaskDelay(pdMS_TO_TICKS(2000));
-            goto loop3;
-        }
-        
-        
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        
-        // ====================================================================
-        // PHASE 4: RISING (STATIC_DEPTH)
-        // ====================================================================
-        ESP_LOGI(TAG, " ======================= Phase 4: RISING (STATIC_DEPTH) ======================= ");
-        // Static setup already done in phase 3
-        setup_static_depth_packages(&lowering_pkg, &rising_pkg);
-        ret = rtc_save_motorcontroller_pkg_rising(&rising_pkg);
-        loop4:
-        // Save rising package to RTC
-        ret = rtc_save_motorcontroller_pkg_rising(&rising_pkg);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to save rising package: %s", esp_err_to_name(ret));
-            vTaskDelay(pdMS_TO_TICKS(2000));
-            goto loop4;
-        }
-        
-        // Start manager worker task (non-blocking)
-        ret = motorcontroller_manager_start_worker(RISING);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to start manager worker: %s", esp_err_to_name(ret));
-            vTaskDelay(pdMS_TO_TICKS(2000));
-            goto loop4;
-        }
-        
-        // Wait for completion (high timeout, will return when worker responds)
-        ret = motorcontroller_manager_wait_completion(300000); // 5 minutes timeout
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Phase 4 failed: %s", esp_err_to_name(ret));
-            vTaskDelay(pdMS_TO_TICKS(2000));
-            goto loop4;
-        }
-        
-        // Package updated automatically by background task
-        // Reload updated packages from RTC for next cycle
-        rtc_load_motorcontroller_pkg_rising(&rising_pkg);
-        rtc_load_motorcontroller_pkg_lowering(&lowering_pkg);
-        
-        // Clean up CAN bus
+        ESP_LOGW(TAG,"================================================================");
+        ESP_LOGI(TAG,"|                  === Cycle #%d Complete ===                    |", cycle_count);
+        ESP_LOGW(TAG,"================================================================");
+        printf("\n\n\n");
         can_bus_manager_deinit();
-        
-        ESP_LOGI(TAG, "=== Cycle #%d Complete ===", cycle_count);
         vTaskDelay(pdMS_TO_TICKS(5000)); // Long pause between full cycles
     }
 }

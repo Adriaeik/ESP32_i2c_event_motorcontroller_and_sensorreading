@@ -72,7 +72,7 @@ esp_err_t update_and_store_pkg(motorcontroller_pkg_t *pkg, const motorcontroller
     }
     
     // Update package with response data
-    ESP_LOGI(TAG, "Speed updated: %d → %d cm/s", resp->estimated_cm_per_s, resp->estimated_cm_per_s);
+    ESP_LOGI(TAG, "Speed updated:  %.2f → %.2f cm/s", (float)pkg->prev_estimated_cm_per_s/1000.0, (float)resp->estimated_cm_per_s/1000.0);
     pkg->prev_working_time = resp->working_time;
     pkg->prev_estimated_cm_per_s = resp->estimated_cm_per_s;
     pkg->prev_reported_depth = get_reported_depth(); // must be updated by sensor 
@@ -206,26 +206,27 @@ static void motorcontroller_manager_task(void *arg) {
     
     if (result == ESP_OK) {
         // 3. Calculate timeout based on package content
-        uint32_t worstcase_recovery_case_ms = (4*10)*1000; // add time to allow recovery sequenses to happen befor we call timeout
+        uint32_t worstcase_recovery_case_ms = (4*15)*1000; // add time to allow recovery sequenses to happen befor we call timeout
         uint32_t estimated_timeout = calculate_operation_timeout_with_margin(&s_manager_ctx.current_pkg, 30/*30%*/) * 1000 + worstcase_recovery_case_ms; // Convert to ms
         
         // 4. Wait for response with calculated timeout
         result = wait_for_worker(&s_manager_ctx.received_resp, 0, estimated_timeout);
         
         if (result == ESP_OK) {
-            xEventGroupSetBits(s_manager_ctx.event_group, MANAGER_TASK_RESP_RECEIVED_BIT);
-            ESP_LOGI(TAG, "Response received successfully");
+            
             
             // 5. Update and store to RTC
             print_motorcontroller_response_info(&s_manager_ctx.received_resp, TAG);
             result = update_and_store_pkg(&s_manager_ctx.current_pkg, &s_manager_ctx.received_resp);
             // update and store it
-            
+
             // Check if worker reported failure
             if (s_manager_ctx.received_resp.result != ESP_OK) {
                 ESP_LOGW(TAG, "Worker reported failure: %s", esp_err_to_name(s_manager_ctx.received_resp.result));
                 xEventGroupSetBits(s_manager_ctx.event_group, MANAGER_TASK_WORKER_FAIL_BIT);
-            }
+            } 
+            xEventGroupSetBits(s_manager_ctx.event_group, MANAGER_TASK_RESP_RECEIVED_BIT);
+            ESP_LOGI(TAG, "Response received successfully");
         } else if (result == ESP_ERR_TIMEOUT) {
             ESP_LOGE(TAG, "Timeout waiting for worker response");
             xEventGroupSetBits(s_manager_ctx.event_group, MANAGER_TASK_TIMEOUT_BIT);
@@ -266,37 +267,6 @@ esp_err_t load_or_init_motorcontroller_pkg(motorcontroller_pkg_t *pkg, state_t f
     return result;
 }
 
-uint16_t apply_manager_alpha_beta_filter(uint16_t prev_estimate, 
-                                        int actual_time, 
-                                        uint16_t distance,
-                                        double alpha, 
-                                        double beta) {
-    if (actual_time <= 0 || distance == 0) {
-        ESP_LOGW(TAG, "Invalid parameters for alpha-beta filter");
-        return prev_estimate;
-    }
-    
-    // Calculate actual speed from this operation
-    uint16_t actual_speed = distance / actual_time;
-    
-    // Apply alpha-beta filtering
-    // Simple implementation: filtered_speed = alpha * actual_speed + (1 - alpha) * prev_estimate
-    double filtered_speed = alpha * actual_speed + (1.0 - alpha) * prev_estimate;
-    
-    // Clamp to reasonable values
-    if (filtered_speed < 5.0) {
-        filtered_speed = 5.0;
-    } else if (filtered_speed > 200.0) {
-        filtered_speed = 200.0;
-    }
-    
-    uint16_t result = (uint16_t)filtered_speed;
-    
-    ESP_LOGI(TAG, "Alpha-beta filter: prev=%d, actual=%d, filtered=%d (α=%.2f)", 
-             prev_estimate, actual_speed, result, alpha);
-    
-    return result;
-}
 
 bool validate_motorcontroller_pkg(const motorcontroller_pkg_t *pkg, state_t state) {
     // Use existing common validation function    
