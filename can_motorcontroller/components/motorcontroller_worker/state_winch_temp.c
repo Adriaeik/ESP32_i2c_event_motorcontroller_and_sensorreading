@@ -1165,8 +1165,8 @@ static uint32_t calculate_state_timeout(const winch_state_context_t *ctx) {
             
         case WS_STATIC_WAIT:
             timeout_ms = (ctx->current_pkg->static_poll_interval_s * ctx->current_pkg->samples * 1000) + STATIC_WAIT_BUFFER_MS;
-            format_time_string(timeout_ms, time_str, sizeof(time_str));
-            ESP_LOGI(TAG, "⏱️  Static wait: %s", time_str);
+            format_time_string(timeout_ms - timer_ms_since_start(&ctx->static_timer), time_str, sizeof(time_str));
+            ESP_LOGI(TAG, "⏱️  Static wait left: %s", time_str);
             return timeout_ms;
             
         case WS_TENSION_RECOVERY_REVERSE:

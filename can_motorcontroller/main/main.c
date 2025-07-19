@@ -436,8 +436,8 @@ static void run_test_cycle(int cycle_count) {
     ESP_LOGI(TEST_TAG, "🔄 Starting test cycle #%d", cycle_count);
     
     for (test_operation_t op = 0; op < TEST_MAX_OPERATIONS; op++) {
-        // esp_err_t result = run_test_operation(op, cycle_count);
-        esp_err_t result = run_test_operation(TEST_RISING_STATIC_DEPTH, cycle_count);
+        esp_err_t result = run_test_operation(op, cycle_count);
+        // esp_err_t result = run_test_operation(TEST_RISING_STATIC_DEPTH, cycle_count);
         
         if (result != ESP_OK) {
             ESP_LOGE(TEST_TAG, "💥 Test operation %s FAILED! Aborting cycle.", 
