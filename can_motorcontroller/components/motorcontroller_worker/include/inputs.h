@@ -27,6 +27,7 @@ void inputs_deinit(void);
 bool inputs_get_winch_home(void);
 bool inputs_get_winch_tension(void);
 bool inputs_get_winch_auto(void);
+bool inputs_get_auto_enable(void);
 
 // Edge detection functions for critical sensors
 bool inputs_home_edge_detected(void);

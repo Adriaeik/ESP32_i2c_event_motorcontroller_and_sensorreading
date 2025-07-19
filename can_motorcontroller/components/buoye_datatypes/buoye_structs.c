@@ -127,18 +127,14 @@ void motorcontroller_pkg_init_default(motorcontroller_pkg_t *pkg)
     memset(pkg, 0, sizeof(motorcontroller_pkg_t));
     
     pkg->STATE = LOWERING;
-    pkg->prev_working_time = 0;
-    pkg->rising_timeout_percent = 10;
-    pkg->prev_reported_depth = 0;
-    pkg->prev_end_depth = 0;
-    pkg->prev_estimated_cm_per_s = 50;  // Default 50 cm/s
-    pkg->poll_type = STATIC_DEPTH;
-    pkg->end_depth = 0;
-    pkg->samples = 1;
-    pkg->static_poll_interval_s = 5;
-    pkg->alpha = 0.1;
-    pkg->beta = 0.05;
-    
+    pkg->rising_timeout_percent = 30;
+    pkg->estimated_cm_per_s_x1000 = 50000;  // Default 50 cm/s - make config
+    pkg->poll_type = CONFIG_DEFAULT_POLL_TYPE;
+    pkg->end_depth = CONFIG_DEFAULT_END_DEPTH;
+    pkg->samples = CONFIG_DEFAULT_SAMPLE_COUNT;
+    pkg->static_poll_interval_s = CONFIG_DEFAULT_STATIC_POLL_PERIOD;
+    pkg->prev_reported_depth = CONFIG_DEFAULT_END_DEPTH;
+    pkg->prev_working_time = CONFIG_DEFAULT_END_DEPTH/pkg->estimated_cm_per_s_x1000/1000;
     // Initialize static points array (null-terminated)
     memset(pkg->static_points, 0, sizeof(pkg->static_points));
 }
@@ -163,6 +159,15 @@ const char* state_to_string(state_t s) {
         case LOWERING: return "LOWERING";
         case RISING:   return "RISING";
         case INIT:     return "INIT";
+        default:       return "UNKNOWN";
+    }
+}
+
+const char* poll_to_string(POLL_TYPE s){
+    switch (s) {
+        case ALPHA_DEPTH: return "ALPHA_DEPTH";
+        case STATIC_DEPTH:   return "STATIC_DEPTH";
+        case LIN_TIME:     return "LIN_TIME";
         default:       return "UNKNOWN";
     }
 }

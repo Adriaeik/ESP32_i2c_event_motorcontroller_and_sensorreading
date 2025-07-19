@@ -24,33 +24,12 @@ static const char *TAG = "MAIN";
 static void init_default_packages(motorcontroller_pkg_t *lowering_pkg, motorcontroller_pkg_t *rising_pkg) {
     // Default LOWERING package (ALPHA_DEPTH)
     memset(lowering_pkg, 0, sizeof(motorcontroller_pkg_t));
+    motorcontroller_pkg_init_default(lowering_pkg);
     lowering_pkg->STATE = LOWERING;
-    lowering_pkg->prev_working_time = 0;
-    lowering_pkg->rising_timeout_percent = 30;
-    lowering_pkg->prev_reported_depth = 0;
-    lowering_pkg->prev_end_depth = 0;
-    lowering_pkg->prev_estimated_cm_per_s = 15000;  // 15 cm/s initially
-    lowering_pkg->poll_type = ALPHA_DEPTH;
-    lowering_pkg->end_depth = 300;  // 3 meters
-    lowering_pkg->samples = 3;
-    lowering_pkg->static_poll_interval_s = 1;
-    lowering_pkg->alpha = 0.9;
-    lowering_pkg->beta = 0.1;
-    
+
     // Default RISING package (ALPHA_DEPTH)
     memset(rising_pkg, 0, sizeof(motorcontroller_pkg_t));
-    rising_pkg->STATE = RISING;
-    rising_pkg->prev_working_time = 20;
-    rising_pkg->rising_timeout_percent = 30;
-    rising_pkg->prev_reported_depth = 300;
-    rising_pkg->prev_end_depth = 300;
-    rising_pkg->prev_estimated_cm_per_s = 15000;   // 1.8 cm/s initially (faster up)
-    rising_pkg->poll_type = ALPHA_DEPTH;
-    rising_pkg->end_depth = 300;  // start position when rising
-    rising_pkg->samples = 3;
-    rising_pkg->static_poll_interval_s = 1;
-    rising_pkg->alpha = 0.9;
-    rising_pkg->beta = 0.1;
+    motorcontroller_pkg_init_default(rising_pkg);
 }
 
 // Update packages with operation results and prepare for next cycle
@@ -58,8 +37,6 @@ static void update_packages_after_operation(motorcontroller_pkg_t *pkg, const mo
                                            uint16_t new_reported_depth) {
     // Update previous operation data
     pkg->prev_working_time = resp->working_time;
-    pkg->prev_estimated_cm_per_s = resp->estimated_cm_per_s;
-    pkg->prev_end_depth = pkg->end_depth;
     pkg->prev_reported_depth = new_reported_depth;
     
     ESP_LOGI(TAG, "Package updated - Working time: %ds, Speed: %d cm/s, Depth: %d cm",
@@ -117,7 +94,7 @@ static uint16_t simulate_depth_after_operation(const motorcontroller_pkg_t *pkg,
 }
 
 // Uncomment for manager, comment for worker
-#define ROLE_MANAGER         // <------------
+// #define ROLE_MANAGER         // <------------
 
 #ifdef ROLE_MANAGER
 #include "motorcontroller_manager.h"
@@ -188,6 +165,8 @@ void manager_main_task(void *arg) {
 
 #else
 #include "motorcontroller_worker.h"
+#define ONLY_WINCH //<-----------------
+
 #ifndef ONLY_WINCH
 
 void worker_main_task(void *arg) {
@@ -266,136 +245,274 @@ sleep:
     }
 }
 #else
-void winch_main_task(void *pvParameters) {
-    ESP_LOGI(TAG, "Worker main task started");
+static const char* TEST_TAG = "winch_test";
+
+// ============================================================================
+// TEST OPERATION DEFINITIONS
+// ============================================================================
+
+typedef enum {
+    TEST_GO_HOME = 0,
+    TEST_LOWER_LIN_TIME,
+    TEST_RISING_LIN_TIME, 
+    TEST_LOWER_ALPHA_DEPTH,
+    TEST_RISING_ALPHA_DEPTH,
+    TEST_LOWERING_STATIC_DEPTH,
+    TEST_RISING_STATIC_DEPTH,
+    TEST_MAX_OPERATIONS
+} test_operation_t;
+
+static const char* test_operation_names[] = {
+    "GO_HOME",
+    "LOWER_LIN_TIME", 
+    "RISING_LIN_TIME",
+    "LOWER_ALPHA_DEPTH",
+    "RISING_ALPHA_DEPTH", 
+    "LOWERING_STATIC_DEPTH",
+    "RISING_STATIC_DEPTH"
+};
+
+// ============================================================================
+// TEST HELPER FUNCTIONS
+// ============================================================================
+
+static void print_test_separator(int cycle_count, test_operation_t operation) {
+    ESP_LOGW(TEST_TAG,"================================================================");
+    ESP_LOGI(TEST_TAG,"|              === Cycle #%d: %s ===              |", 
+             cycle_count, test_operation_names[operation]);
+    ESP_LOGW(TEST_TAG,"================================================================");
+}
+
+static void print_cycle_complete(int cycle_count) {
+    ESP_LOGW(TEST_TAG,"================================================================");
+    ESP_LOGI(TEST_TAG,"|                  === Cycle #%d Complete ===                    |", cycle_count);
+    ESP_LOGW(TEST_TAG,"================================================================");
+    printf("\n\n\n");
+}
+
+static void print_operation_result(esp_err_t result, const motorcontroller_response_t *resp) {
+    if (result == ESP_OK) {
+        ESP_LOGI(TEST_TAG, "✅ Operation completed successfully!");
+        if (resp) {
+            print_motorcontroller_response_info(resp, TEST_TAG);
+        }
+    } else {
+        ESP_LOGE(TEST_TAG, "❌ Operation failed with error: %s", esp_err_to_name(result));
+        if (resp) {
+            print_motorcontroller_response_info(resp, TEST_TAG);
+        }
+    }
+}
+
+// ============================================================================
+// TEST PACKAGE SETUP
+// ============================================================================
+
+static void setup_test_package(motorcontroller_pkg_t *pkg, test_operation_t operation) {
+    // Start with defaults
+    motorcontroller_pkg_init_default(pkg);
     
-    motorcontroller_pkg_t lowering_pkg, rising_pkg;
+    switch (operation) {
+        case TEST_GO_HOME:
+            pkg->STATE = INIT;
+            pkg->poll_type = ALPHA_DEPTH;
+            pkg->end_depth = 300; 
+            pkg->estimated_cm_per_s_x1000 = 15000; // 15.000 cm/s for safety
+            break;
+            
+        case TEST_LOWER_LIN_TIME:
+            pkg->STATE = LOWERING;
+            pkg->poll_type = LIN_TIME;
+            pkg->end_depth = 300; // Not used for LIN_TIME but set for clarity
+            pkg->static_poll_interval_s = 10; // 10 seconds lowering
+            pkg->estimated_cm_per_s_x1000 = 12000; // 12.000 cm/s
+            break;
+            
+        case TEST_RISING_LIN_TIME:
+            pkg->STATE = RISING;
+            pkg->poll_type = LIN_TIME;
+            pkg->end_depth = 300;  // Going to home
+            pkg->static_poll_interval_s = 8; // 8 seconds max before home expected
+            pkg->rising_timeout_percent = 150; // 8 * 1.5 = 12 seconds timeout
+            pkg->estimated_cm_per_s_x1000 = 10000; // 10.000 cm/s upward
+            break;
+            
+        case TEST_LOWER_ALPHA_DEPTH:
+            pkg->STATE = LOWERING;
+            pkg->poll_type = ALPHA_DEPTH;
+            pkg->end_depth = 400; // 4 meters down
+            pkg->estimated_cm_per_s_x1000 = 15000; // 15.000 cm/s
+            break;
+            
+        case TEST_RISING_ALPHA_DEPTH:
+            pkg->STATE = RISING;
+            pkg->poll_type = ALPHA_DEPTH;
+            pkg->end_depth = 400; // 4 meters down
+            pkg->rising_timeout_percent = 120; // 20% safety margin
+            pkg->estimated_cm_per_s_x1000 = 12000; // 12.000 cm/s upward
+            break;
+            
+        case TEST_LOWERING_STATIC_DEPTH:
+            pkg->STATE = LOWERING;
+            pkg->poll_type = STATIC_DEPTH;
+            pkg->end_depth = 600; // 6 meters total
+            pkg->static_points[0] = 100; // 1m
+            pkg->static_points[1] = 250; // 2.5m  
+            pkg->static_points[2] = 450; // 4.5m
+            pkg->static_points[3] = 600; // 6m (final)
+            pkg->static_points[4] = 0;   // Null terminator
+            pkg->samples = 3; // 3 samples at each point
+            pkg->static_poll_interval_s = 2; // 2 seconds between samples
+            pkg->estimated_cm_per_s_x1000 = 8000; // 8.000 cm/s slow for precision
+            break;
+            
+        case TEST_RISING_STATIC_DEPTH:
+            pkg->STATE = RISING;
+            pkg->poll_type = STATIC_DEPTH;
+            pkg->end_depth = 600; // 6 meters total
+            pkg->static_points[0] = 400; // 4m (reversed order for rising)
+            pkg->static_points[1] = 200; // 2m
+            pkg->static_points[2] = 50;  // 0.5m
+            pkg->static_points[3] = 0;   // Null terminator  
+            pkg->samples = 2; // 2 samples at each point
+            pkg->static_poll_interval_s = 3; // 3 seconds between samples
+            pkg->rising_timeout_percent = 130; // 30% safety margin
+            pkg->estimated_cm_per_s_x1000 = 10000; // 10.000 cm/s upward
+            break;
+            
+        default:
+            ESP_LOGE(TEST_TAG, "Unknown test operation: %d", operation);
+            break;
+    }
+}
+
+// ============================================================================
+// INDIVIDUAL TEST OPERATIONS
+// ============================================================================
+
+static esp_err_t run_test_operation(test_operation_t operation, int cycle_count) {
+    motorcontroller_pkg_t pkg;
     motorcontroller_response_t resp;
-    esp_err_t ret;
-    // Try to load from RTC, use defaults if not available
-    if (rtc_load_motorcontroller_pkg_lowering(&lowering_pkg) != ESP_OK) {
-        ESP_LOGI(TAG, "No saved lowering package, using defaults");
-    }
-    if (rtc_load_motorcontroller_pkg_rising(&rising_pkg) != ESP_OK) {
-        ESP_LOGI(TAG, "No saved rising package, using defaults");
+    esp_err_t result;
+    
+    print_test_separator(cycle_count, operation);
+    
+    // Setup package for this operation
+    if (operation == TEST_GO_HOME) {
+        // Use the dedicated go home function
+        ESP_LOGI(TEST_TAG, "Executing: winch_go_to_home_position()");
+        result = winch_go_to_home_position();
+        
+        // For go home, we don't have package info to print
+        ESP_LOGI(TEST_TAG, "Go home operation completed with result: %s", esp_err_to_name(result));
+        
+    } else {
+        // Setup and print package info
+        setup_test_package(&pkg, operation);
+        ESP_LOGI(TEST_TAG, "📦 Prepared test package:");
+        print_motorcontroller_pkg_info(&pkg, TEST_TAG);
+        
+        ESP_LOGI(TEST_TAG, "🚀 Executing: winch_execute_operation()");
+        
+        // Execute the operation
+        result = winch_execute_operation(&pkg, &resp);
+        
+        // Print results
+        print_operation_result(result, &resp);
     }
     
-    // Initialize default packages
-    init_default_packages(&lowering_pkg, &rising_pkg);
-    print_motorcontroller_pkg_info(&rising_pkg, TAG);
-
-    uint32_t cycle_count = 0;
+    ESP_LOGI(TEST_TAG, "⏰ Waiting 3 seconds before next operation...");
+    vTaskDelay(pdMS_TO_TICKS(3000));
     
-    while (1) {
-        cycle_count++;
-        ESP_LOGI(TAG, "=== Starting Cycle #%d ===", cycle_count);
-        
-        // ====================================================================
-        // PHASE 1: LOWERING (ALPHA_DEPTH)
-        // ====================================================================
-        ESP_LOGI(TAG, "Phase 1: LOWERING (ALPHA_DEPTH)");
-        lowering_pkg.poll_type = ALPHA_DEPTH;
-        
-        loop1:
-        ret = do_work(&lowering_pkg, &resp);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Phase 1 failed: %s", esp_err_to_name(ret));
-            vTaskDelay(pdMS_TO_TICKS(2000));
-            goto loop1;
-        }
-        
-        // Update package and simulate new depth
-        uint16_t new_depth = simulate_depth_after_operation(&lowering_pkg, &resp);
-        update_packages_after_operation(&lowering_pkg, &resp, new_depth);
-        rtc_save_motorcontroller_pkg_lowering(&lowering_pkg);
-        
-        // Update rising package with current position
-        rising_pkg.prev_reported_depth = new_depth;
-        
-        vTaskDelay(pdMS_TO_TICKS(1000)); // Brief pause
-        
-        // ====================================================================
-        // PHASE 2: RISING (ALPHA_DEPTH)
-        // ====================================================================
-        ESP_LOGI(TAG, "Phase 2: RISING (ALPHA_DEPTH)");
-        rising_pkg.poll_type = ALPHA_DEPTH;
-        ESP_LOGI(TAG, "depth %d", rising_pkg.end_depth);
-        loop2:
-        ret = do_work(&rising_pkg, &resp);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Phase 2 failed: %s", esp_err_to_name(ret));
-            vTaskDelay(pdMS_TO_TICKS(2000));
-            goto loop2;
-        }
-        
-        // Update package
-        new_depth = simulate_depth_after_operation(&rising_pkg, &resp);
-        update_packages_after_operation(&rising_pkg, &resp, new_depth);
-        rtc_save_motorcontroller_pkg_rising(&rising_pkg);
-        
-        // Update lowering package with current position
-        lowering_pkg.prev_reported_depth = new_depth;
-        
-        vTaskDelay(pdMS_TO_TICKS(3000)); // Longer pause between cycles
-        
-        // ====================================================================
-        // PHASE 3: LOWERING (STATIC_DEPTH)
-        // ====================================================================
-        ESP_LOGI(TAG, "Phase 3: LOWERING (STATIC_DEPTH)");
-        setup_static_depth_packages(&lowering_pkg, &rising_pkg);
-        
-        loop3:
-        ret = do_work(&lowering_pkg, &resp);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Phase 3 failed: %s", esp_err_to_name(ret));
-            vTaskDelay(pdMS_TO_TICKS(2000));
-            goto loop3;
-        }
-        
-        // Update package
-        new_depth = simulate_depth_after_operation(&lowering_pkg, &resp);
-        update_packages_after_operation(&lowering_pkg, &resp, new_depth);
-        rtc_save_motorcontroller_pkg_lowering(&lowering_pkg);
-        
-        // Update rising package
-        rising_pkg.prev_reported_depth = new_depth;
-        
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        
-        // ====================================================================
-        // PHASE 4: RISING (STATIC_DEPTH)
-        // ====================================================================
-        ESP_LOGI(TAG, "Phase 4: RISING (STATIC_DEPTH)");
-        // Static setup already done in phase 3
-        
-        loop4:
-        ret = do_work(&rising_pkg, &resp);
-        if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Phase 4 failed: %s", esp_err_to_name(ret));
-            vTaskDelay(pdMS_TO_TICKS(2000));
-            goto loop4;
-        }
-        
-        // Update package
-        new_depth = simulate_depth_after_operation(&rising_pkg, &resp);
-        update_packages_after_operation(&rising_pkg, &resp, new_depth);
-        rtc_save_motorcontroller_pkg_rising(&rising_pkg);
-        
-        // Update lowering package for next cycle
-        lowering_pkg.prev_reported_depth = new_depth;
-        
-        ESP_LOGI(TAG, "=== Cycle #%d Complete ===", cycle_count);
-        vTaskDelay(pdMS_TO_TICKS(5000)); // Long pause between full cycles
-    }
+    return result;
 }
 
+// ============================================================================
+// MAIN TEST LOOP
+// ============================================================================
 
-// Function to start the worker (call this from app_main)
+static void run_test_cycle(int cycle_count) {
+    ESP_LOGI(TEST_TAG, "🔄 Starting test cycle #%d", cycle_count);
+    
+    for (test_operation_t op = 0; op < TEST_MAX_OPERATIONS; op++) {
+        esp_err_t result = run_test_operation(op, cycle_count);
+        
+        if (result != ESP_OK) {
+            ESP_LOGE(TEST_TAG, "💥 Test operation %s FAILED! Aborting cycle.", 
+                     test_operation_names[op]);
+            return;
+        }
+    }
+    
+    print_cycle_complete(cycle_count);
+}
+
 void start_winch_main(void) {
-
-    xTaskCreate(winch_main_task, "worker_main", 8192, NULL, 5, NULL);
-    ESP_LOGI(TAG, "Worker main task created");
+    ESP_LOGI(TEST_TAG, "🧪 Winch State Machine Test Starting...");
+    
+    // Initialize the winch controller
+    ESP_LOGI(TEST_TAG, "🔧 Initializing winch controller...");
+    esp_err_t init_result = winch_controller_init();
+    if (init_result != ESP_OK) {
+        ESP_LOGE(TEST_TAG, "❌ Failed to initialize winch controller: %s", 
+                 esp_err_to_name(init_result));
+        return;
+    }
+    ESP_LOGI(TEST_TAG, "✅ Winch controller initialized successfully!");
+    
+    // Wait a moment for system to stabilize
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    
+    // Run test cycles
+    int cycle_count = 1;
+    while (true) {
+        ESP_LOGI(TEST_TAG, "\n🏁 === STARTING TEST CYCLE #%d ===", cycle_count);
+        
+        run_test_cycle(cycle_count);
+        
+        ESP_LOGI(TEST_TAG, "😴 Cycle #%d complete. Waiting 10 seconds before next cycle...", 
+                 cycle_count);
+        vTaskDelay(pdMS_TO_TICKS(10000));
+        
+        cycle_count++;
+        
+        // Optional: Limit number of cycles for testing
+        if (cycle_count > 5) {
+            ESP_LOGI(TEST_TAG, "🛑 Test completed after %d cycles. Stopping.", cycle_count - 1);
+            break;
+        }
+    }
+    
+    // Cleanup
+    ESP_LOGI(TEST_TAG, "🧹 Deinitializing winch controller...");
+    winch_controller_deinit();
+    ESP_LOGI(TEST_TAG, "✅ Test complete!");
 }
+
+// ============================================================================
+// ALTERNATIVE SINGLE OPERATION TEST FUNCTION
+// ============================================================================
+
+/**
+ * @brief Test a single operation (useful for debugging specific operations)
+ * @param operation The operation to test
+ */
+void test_single_operation(test_operation_t operation) {
+    ESP_LOGI(TEST_TAG, "🔍 Testing single operation: %s", test_operation_names[operation]);
+    
+    esp_err_t init_result = winch_controller_init();
+    if (init_result != ESP_OK) {
+        ESP_LOGE(TEST_TAG, "Failed to initialize winch controller");
+        return;
+    }
+    
+    esp_err_t result = run_test_operation(operation, 1);
+    
+    ESP_LOGI(TEST_TAG, "Single operation test result: %s", esp_err_to_name(result));
+    
+    winch_controller_deinit();
+}
+
 #endif //ONLY_WINCH
 #endif //ROLE_MANAGER
 

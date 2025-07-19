@@ -328,7 +328,7 @@ void inputs_deinit(void) {
 bool inputs_get_winch_home(void)   { return inputs_initialized ? inputs[0].stable_state : false; }
 bool inputs_get_winch_tension(void){ return inputs_initialized ? inputs[1].stable_state : false; }
 bool inputs_get_winch_auto(void)   { return inputs_initialized ? inputs[2].stable_state : false; }
-
+bool inputs_get_auto_enable(void)  { return !inputs_get_winch_auto();}
 // Edge detection functions - check and clear flags
 bool inputs_home_edge_detected(void) {
     if (!inputs_initialized) return false;

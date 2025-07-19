@@ -17,6 +17,8 @@ typedef enum{
     STATIC_DEPTH, // do n pols at m depths (this needs to include n and m)
     LIN_TIME, // for debug, we can use time since the depth wont chande on land..
 }POLL_TYPE;
+const char* poll_to_string(POLL_TYPE s);
+
 
 #define MAX_POINTS 80
 typedef struct {
@@ -70,23 +72,40 @@ sheared_status_t sheared_status_default(void);
 
 /// FOR MOTORCONTROLLER
 // MOTORCONTROLLER package: sent from master to controller to initiate lowering or raising
-typedef struct {
-    state_t STATE;                   // current operation mode: LOWERING or RISING
-    int prev_working_time;          // duration (seconds) of last operation, used for estimating next time
-    int rising_timeout_percent;     // factor to define timeout threshold for rising if home sensor not seen
-    uint16_t prev_reported_depth;   // last measured depth (cm) from the sensor
-    uint16_t prev_end_depth;        // previous target depth (cm) what we tried to rach. if we did correct this == prev_reported_depth
-    uint16_t prev_estimated_cm_per_s;// last estimated lowering speed in cm/s (scaled e.g., 10000 => 10.000 cm/s)
-    POLL_TYPE poll_type;            // type of polling (e.g., STATIC_DEPTH or CONTINUOUS)
-    uint16_t end_depth;             // target depth for this operation (cm) remember to set this to the max point of static_points if poll_type = static
-    uint16_t static_points[MAX_POINTS]; // depths at which to pause and sample (cm), terminated by 0 
-    uint16_t samples;               // sample count at each static point
-    uint16_t static_poll_interval_s; // interval between static samples (seconds)
+// old
+// typedef struct {
+//     state_t STATE;                   // current operation mode: LOWERING or RISING
+//     int prev_working_time;          // duration (seconds) of last operation, used for estimating next time
+//     int rising_timeout_percent;     // factor to define timeout threshold for rising if home sensor not seen
+//     uint16_t prev_reported_depth;   // last measured depth (cm) from the sensor
+//     uint16_t prev_end_depth;        // previous target depth (cm) what we tried to rach. if we did correct this == prev_reported_depth
+//     uint16_t prev_estimated_cm_per_s;// last estimated lowering speed in cm/s (scaled e.g., 10000 => 10.000 cm/s)
+//     POLL_TYPE poll_type;            // type of polling (e.g., STATIC_DEPTH or CONTINUOUS)
+//     uint16_t end_depth;             // target depth for this operation (cm) remember to set this to the max point of static_points if poll_type = static
+//     uint16_t static_points[MAX_POINTS]; // depths at which to pause and sample (cm), terminated by 0 
+//     uint16_t samples;               // sample count at each static point
+//     uint16_t static_poll_interval_s; // interval between static samples (seconds)
 
-    // added for filter operation and timing
-    double alpha;                   // alpha gain for alpha-beta filter
-    double beta;                    // [UNUSED] beta gain for alpha-beta filter
+//     // added for filter operation and timing
+//     double alpha;                   // alpha gain for alpha-beta filter
+//     double beta;                    // [UNUSED] beta gain for alpha-beta filter
+// } motorcontroller_pkg_t;
+
+//new
+typedef struct {
+    state_t STATE;                      // current operation mode: LOWERING or RISING
+    int rising_timeout_percent;         // factor to define timeout threshold for rising if home sensor not seen
+    uint16_t estimated_cm_per_s_x1000;        // estimated lowering speed in cm/s (scaled e.g., 10000 => 10.000 cm/s)
+    POLL_TYPE poll_type;                // type of polling (e.g., STATIC_DEPTH or CONTINUOUS)
+    uint16_t end_depth;                 // target depth for this operation (cm) remember to set this to the max point of static_points if poll_type = static
+    uint16_t static_points[MAX_POINTS]; // depths at which to pause and sample (cm), terminated by 0 
+    uint16_t samples;                   // if STATIC_DEPTH: sample count at each static point(how many sampels to take at each static point)
+    uint16_t static_poll_interval_s;    // if STATIC_DEPTH: interval between static samples (seconds). if LIN_TIME: (if lowering: how long to run. if rising: this*rising_timeout_percent is the timeout before we have to hit home, else its timout error)
+    int prev_working_time;          // duration (seconds) of last operation, used for estimating next time
+    uint16_t prev_reported_depth;   // last measured depth (cm) from the sensor
 } motorcontroller_pkg_t;
+
+
 void motorcontroller_pkg_init_default(motorcontroller_pkg_t *pkg);
 // MOTORCONTROLLER response package: sent back when finished
 typedef struct {
@@ -95,6 +114,8 @@ typedef struct {
     int working_time;               // total time (seconds) taken for the elevation
     uint16_t estimated_cm_per_s;    // new speed estimate (scaled)
 } motorcontroller_response_t;
+
+
 void motorcontroller_response_init_default(motorcontroller_response_t *resp);
 /*
 // Inputs: measurement depth z_meas (cm), dt in seconds.

@@ -1,7 +1,6 @@
 
 idf_component_register(
-    SRCS "state_winch_temp.c" "winch_controller.c" "motorcontroller_worker.c"
-         "winch_controller"
+    SRCS "state_winch_temp.c" "state_winch_temp.c" "motorcontroller_worker.c"
          "inputs.c"
          "outputs.c"
          "timer.c"

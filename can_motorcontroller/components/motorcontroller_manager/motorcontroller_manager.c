@@ -117,8 +117,7 @@ esp_err_t update_and_store_pkg(motorcontroller_pkg_t *pkg, const motorcontroller
     // Update package with response data
     pkg->prev_working_time = resp->working_time;
     // all these should be the same .. maybe create som checks?
-    // pkg->prev_estimated_cm_per_s = resp->estimated_cm_per_s; 
-    // pkg->prev_end_depth = pkg->end_depth; // should equal pkg->end_depth
+    // pkg->estimated_cm_per_s_x1000 = resp->estimated_cm_per_s; 
     
     // Store to RTC based on state
     esp_err_t result = ESP_OK;
@@ -220,10 +219,10 @@ esp_err_t motorcontroller_manager_wait_completion(uint32_t timeout_ms) {
 
 uint16_t update_speed_estimate(const motorcontroller_pkg_t *pkg) {
     // Start with previous estimate - fallback
-    uint16_t prev_speed_estimate = pkg->prev_estimated_cm_per_s;
-    
+    uint16_t prev_speed_estimate_x1000 = pkg->estimated_cm_per_s_x1000;
+    double alpha = 0.9;
     // If we have previous operation data, update speed estimate
-    if (prev_speed_estimate > 0 && pkg->prev_reported_depth > 0) {
+    if (prev_speed_estimate_x1000 > 0 && pkg->prev_reported_depth > 0) {
         
         double actual_distance_cm = (double)pkg->prev_reported_depth;
         double actual_time_s = (double)pkg->prev_working_time;
@@ -231,12 +230,12 @@ uint16_t update_speed_estimate(const motorcontroller_pkg_t *pkg) {
         if (actual_time_s > 0.1 && actual_distance_cm > 0) {
             // Calculate measured speed from last operation
             double measured_speed_cm_per_s = actual_distance_cm / actual_time_s;
-            double previous_speed_cm_per_s = (double)pkg->prev_estimated_cm_per_s / 1000.0;
+            double previous_speed_cm_per_s = (double)prev_speed_estimate_x1000 / 1000.0;
             
             // Use exponential moving average instead of alpha-beta filter
             // alpha acts as the learning rate (0.0 = no update, 1.0 = full replacement)
-            double updated_speed = previous_speed_cm_per_s * (1.0 - pkg->alpha) + 
-                                 measured_speed_cm_per_s * pkg->alpha;
+            double updated_speed = previous_speed_cm_per_s * (1.0 - alpha) + 
+                                 measured_speed_cm_per_s * alpha;
             
             // Convert back to scaled format
             uint16_t new_estimate = (uint16_t)(updated_speed * 1000.0);
@@ -253,13 +252,13 @@ uint16_t update_speed_estimate(const motorcontroller_pkg_t *pkg) {
             }
         }
     }
-    return prev_speed_estimate;
+    return prev_speed_estimate_x1000;
 }
 
 esp_err_t update_and_save_speed_estimate(motorcontroller_pkg_t *pkg){
     uint16_t speed_estimate = update_speed_estimate(pkg);
     if (speed_estimate>0){
-        pkg->prev_estimated_cm_per_s = speed_estimate;
+        pkg->estimated_cm_per_s_x1000 = speed_estimate;
         if (pkg->STATE == LOWERING) {
             return rtc_save_motorcontroller_pkg_lowering(pkg);
         } else if (pkg->STATE == RISING) {

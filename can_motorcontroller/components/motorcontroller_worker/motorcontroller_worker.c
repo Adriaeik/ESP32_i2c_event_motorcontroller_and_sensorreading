@@ -79,6 +79,7 @@ uint32_t calculate_pure_movement_time(uint32_t total_time_ms,
     return pure_movement_time;
 }
 
+// maybe remove this.. 
 uint16_t calculate_new_speed_estimate(uint16_t distance_cm, uint32_t pure_movement_time_ms) {
     if (pure_movement_time_ms == 0 || distance_cm == 0) {
         ESP_LOGW(TAG, "Invalid parameters for speed calculation: distance=%d, time=%d", 

@@ -10,9 +10,6 @@ extern "C" {
 
 // put thes back in c file with static after testing
 
-uint32_t calculate_expected_time_ms(uint16_t distance_cm, uint16_t speed_cm_per_s);
-uint16_t update_speed_estimate_pre_operation(const motorcontroller_pkg_t *pkg);
-
 
 // Main winch control functions
 /**

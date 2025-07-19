@@ -57,20 +57,20 @@ uint32_t calculate_operation_timeout(const motorcontroller_pkg_t *pkg) {
             break;
 
         case ALPHA_DEPTH:
-            // Calculate timeout as: end_depth / (prev_estimated_cm_per_s / 1000.0)
+            // Calculate timeout as: end_depth / (estimated_cm_per_s_x1000 / 1000.0)
             // Use double precision to preserve accuracy
-            if (pkg->prev_estimated_cm_per_s == 0) {
+            if (pkg->estimated_cm_per_s_x1000 == 0) {
                 ESP_LOGW(TAG, "Zero speed for ALPHA_DEPTH, using default timeout");
                 timeout_seconds = 10; // 10 second default
             } else {
                 // time = distance / speed (using double precision)
-                double actual_speed_cm_per_s = pkg->prev_estimated_cm_per_s / 1000.0;
+                double actual_speed_cm_per_s = pkg->estimated_cm_per_s_x1000 / 1000.0;
                 double timeout_double = pkg->end_depth / actual_speed_cm_per_s;
                 timeout_seconds = (uint32_t)(timeout_double + 0.5); // Round to nearest integer
             }
             
             ESP_LOGD(TAG, "ALPHA_DEPTH timeout: %d s (distance: %d cm / speed: %.3f cm/s)", 
-                     timeout_seconds, pkg->end_depth, pkg->prev_estimated_cm_per_s / 1000.0);
+                     timeout_seconds, pkg->end_depth, pkg->estimated_cm_per_s_x1000 / 1000.0);
             break;
 
         case STATIC_DEPTH: {
@@ -83,11 +83,11 @@ uint32_t calculate_operation_timeout(const motorcontroller_pkg_t *pkg) {
                 break;
             }
 
-            // Calculate travel time component: end_depth / (prev_estimated_cm_per_s / 1000.0)
+            // Calculate travel time component: end_depth / (estimated_cm_per_s_x1000 / 1000.0)
             uint32_t travel_time_s = 0;
-            if (pkg->prev_estimated_cm_per_s > 0) {
+            if (pkg->estimated_cm_per_s_x1000 > 0) {
                 // Use double precision to preserve accuracy
-                double actual_speed_cm_per_s = pkg->prev_estimated_cm_per_s / 1000.0;
+                double actual_speed_cm_per_s = pkg->estimated_cm_per_s_x1000 / 1000.0;
                 double travel_time_double = pkg->end_depth / actual_speed_cm_per_s;
                 travel_time_s = (uint32_t)(travel_time_double + 0.5); // Round to nearest integer
             }
@@ -151,7 +151,7 @@ bool is_motorcontroller_pkg_valid(const motorcontroller_pkg_t *pkg, state_t expe
     }
 
     // Check poll type validity
-    if (pkg->poll_type != STATIC_DEPTH && pkg->poll_type != ALPHA_DEPTH) {
+    if (pkg->poll_type != STATIC_DEPTH && pkg->poll_type != ALPHA_DEPTH && pkg->poll_type != LIN_TIME) {
         ESP_LOGE(TAG, "Invalid poll type: %d", pkg->poll_type);
         return false;
     }
@@ -162,17 +162,11 @@ bool is_motorcontroller_pkg_valid(const motorcontroller_pkg_t *pkg, state_t expe
         return false;
     }
 
-    if (pkg->prev_end_depth > MAX_PREV_END_DEPTH) {
-        ESP_LOGE(TAG, "Previous end depth too large: %d cm > %d cm", 
-                 pkg->prev_end_depth, MAX_PREV_END_DEPTH);
-        return false;
-    }
-
     // Check speed estimate (scaled value)
-    if (pkg->prev_estimated_cm_per_s > MAX_SPEED_SCALED) {
-        ESP_LOGE(TAG, "Speed estimate too high: %d (%.3f cm/s) > %d (%.3f cm/s)", 
-                 pkg->prev_estimated_cm_per_s, pkg->prev_estimated_cm_per_s / 1000.0,
-                 MAX_SPEED_SCALED, MAX_SPEED_SCALED / 1000.0);
+    if (pkg->estimated_cm_per_s_x1000 > MAX_SPEED_SCALED) {
+        ESP_LOGE(TAG, "Speed estimate too high: (%.3f cm/s) > (%.3f cm/s)", 
+                 pkg->estimated_cm_per_s_x1000 / 1000.0,
+                 MAX_SPEED_SCALED / 1000.0);
         return false;
     }
 
@@ -190,12 +184,6 @@ bool is_motorcontroller_pkg_valid(const motorcontroller_pkg_t *pkg, state_t expe
         return false;
     }
 
-    // Check alpha filter parameter (exclusive range)
-    if (pkg->alpha <= 0.0f || pkg->alpha >= 1.0f) {
-        ESP_LOGE(TAG, "Alpha parameter out of range: %f (must be 0.0 < α < 1.0)", pkg->alpha);
-        return false;
-    }
-
     // Beta is not used - no validation needed
 
     // Additional checks for STATIC_DEPTH mode
@@ -209,7 +197,7 @@ bool is_motorcontroller_pkg_valid(const motorcontroller_pkg_t *pkg, state_t expe
 
         // Validate static points
         uint16_t point_count = 0;
-        uint16_t highest_point = 0;
+        uint16_t deepest_point = 0;
         uint16_t prev_point = 0;
         bool found_zero = false;
 
@@ -245,7 +233,7 @@ bool is_motorcontroller_pkg_valid(const motorcontroller_pkg_t *pkg, state_t expe
             }
 
             prev_point = current_point;
-            highest_point = current_point;
+            deepest_point = current_point;
             point_count++;
         }
 
@@ -255,19 +243,19 @@ bool is_motorcontroller_pkg_valid(const motorcontroller_pkg_t *pkg, state_t expe
             return false;
         }
 
-        // For STATIC_DEPTH, prev_end_depth must equal highest static point
-        if (pkg->end_depth != highest_point) {
-            ESP_LOGE(TAG, "end_depth (%d) must equal highest static point (%d) for STATIC_DEPTH",
-                     pkg->prev_end_depth, highest_point);
+        // For STATIC_DEPTH, prev_end_depth must equal deepest static point
+        if (pkg->end_depth != deepest_point) {
+            ESP_LOGE(TAG, "end_depth (%d) must equal deepest static point (%d) for STATIC_DEPTH",
+                     pkg->end_depth, deepest_point);
             return false;
         }
 
-        ESP_LOGD(TAG, "STATIC_DEPTH validation passed: %d points, highest: %d cm", 
-                 point_count, highest_point);
+        ESP_LOGI(TAG, "STATIC_DEPTH validation passed: %d points, deepest: %d cm", 
+                 point_count, deepest_point);
     }
 
-    ESP_LOGD(TAG, "Package validation successful for state %d, poll_type %d", 
-             pkg->STATE, pkg->poll_type);
+    ESP_LOGI(TAG, "Package validation successful for state %s, poll_type %s", 
+             state_to_string(pkg->STATE), poll_to_string(pkg->poll_type));
     return true;
 }
 
@@ -279,27 +267,26 @@ void print_motorcontroller_pkg_info(const motorcontroller_pkg_t *pkg, const char
     
     ESP_LOGI(tag, "=== Motor Controller Package ===");
     ESP_LOGI(tag, "  State: %s", state_to_string(pkg->STATE));
+    ESP_LOGI(tag, "  Poll Type: %s", poll_to_string(pkg->poll_type));
     ESP_LOGI(tag, "  End Depth: %d cm", pkg->end_depth);
-    ESP_LOGI(tag, "  Previous Depth: %d cm", pkg->prev_reported_depth);
-    ESP_LOGI(tag, "  Poll Type: %s", pkg->poll_type == STATIC_DEPTH ? "STATIC" : "ALPHA_DEPTH");
-    ESP_LOGI(tag, "  Samples: %d", pkg->samples);
-    ESP_LOGI(tag, "  Poll Interval: %d seconds", pkg->static_poll_interval_s);
-    ESP_LOGI(tag, "  Previous Speed: %d cm/s", pkg->prev_estimated_cm_per_s/1000);
-    ESP_LOGI(tag, "  Previous Work Time: %d seconds", pkg->prev_working_time);
-    ESP_LOGI(tag, "  Rising Timeout: %d%%", pkg->rising_timeout_percent);
-    ESP_LOGI(tag, "  Filter: α=%.3f, β=%.3f", pkg->alpha, pkg->beta);
-    
-    // Print static points
-    ESP_LOGI(tag, "  Static Points:");
-    bool has_points = false;
-    for (int i = 0; i < MAX_POINTS && pkg->static_points[i] > 0; i++) {
-        ESP_LOGI(tag, "    [%d] %d cm", i, pkg->static_points[i]);
-        has_points = true;
+    if (pkg->poll_type == STATIC_DEPTH){
+        ESP_LOGI(tag, "  Samples on points: %d", pkg->samples);
+        ESP_LOGI(tag, "  Poll Interval: %d seconds", pkg->static_poll_interval_s);
+        // Print static points
+        ESP_LOGI(tag, "  Static Points:");
+        bool has_points = false;
+        for (int i = 0; i < MAX_POINTS && pkg->static_points[i] > 0; i++) {
+            ESP_LOGI(tag, "    [%d] %d cm", i, pkg->static_points[i]);
+            has_points = true;
+        }
+        if (!has_points) {
+            ESP_LOGI(tag, "    (none)");
+        }
     }
-    if (!has_points) {
-        ESP_LOGI(tag, "    (none)");
-    }
-    
+    ESP_LOGI(tag, "  Speed: %d cm/s", pkg->estimated_cm_per_s_x1000/1000);
+    ESP_LOGI(tag, "  Rising Timeout: %d %%", pkg->rising_timeout_percent);
+    ESP_LOGI(tag, "  Estimated Operation time: %d ", calculate_operation_timeout(pkg));
+
     // Validation
     bool valid = is_motorcontroller_pkg_valid(pkg, pkg->STATE);
     ESP_LOGI(tag, "  Validation: %s", valid ? "VALID" : "INVALID");
