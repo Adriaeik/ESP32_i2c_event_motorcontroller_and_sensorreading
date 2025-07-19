@@ -1089,12 +1089,22 @@ static winch_event_data_t wait_for_event_with_timeout(const uint32_t timeout_ms)
                                 break;
                             }
                     } else{
+                        // Ignore HOME events when moving down or in wait states
+                        // this is just debug. should be remove in production
+                        const char* reason = "winch not moving upward";
+                        uint32_t time_now = get_working_time_ms(&g_ctx);
+                        if (g_ctx.current_direction == WINCH_DOWN) {
+                            reason = "we are going down";
+                        } else if (g_ctx.current_direction == WINCH_STOP) {
+                            reason = "winch is stopped";
+                            time_now -= timer_ms_since_start(&g_ctx.static_timer);
+                        }
+                        
                         char time_str[64];
-                        format_time_string(get_working_time_ms(&g_ctx), time_str, sizeof(time_str));
-                         ESP_LOGW(TAG, "NORMAL_OP: HOME sensor IGNORED - we are going down! current working time: %s", 
-                                            time_str);
+                        format_time_string(time_now, time_str, sizeof(time_str));
+                        ESP_LOGW(TAG, "NORMAL_OP: HOME sensor IGNORED - %s! current working time: %s", 
+                                reason, time_str);
                     }
-                    // Ignore HOME events when moving down or in wrong states
                 }
                 break;
             case TENTION:
@@ -1428,19 +1438,44 @@ static uint32_t get_working_time_ms(const winch_state_context_t *ctx){
 
 // Helper to check if we should transition to static wait
 static bool should_go_to_static_wait(const winch_state_context_t *ctx) {
+    // Check if we're already at the target static point
+    if (ctx->current_static_point < ctx->num_points) {
+        if (ctx->current_pkg->end_depth == ctx->sorted_static_points[ctx->current_static_point]) {
+            ESP_LOGI(TAG, "Already at static point %d (%d cm)", 
+                     ctx->current_static_point, ctx->sorted_static_points[ctx->current_static_point]);
+            return true;
+        }
+    }
+    
     if (ctx->current_pkg->poll_type != STATIC_DEPTH) {
         return false;
     }
-    // Check if we've reached the current target static point
+    
     if (ctx->current_static_point < ctx->num_points) {
-        uint32_t expected_time = calculate_expected_time_ms(abs(ctx->sorted_static_points[ctx->current_static_point] - 
-                                                                ctx->current_target_depth), 
-                                                            ctx->validated_speed_cm_per_s_x1000);
-        uint32_t elapsed_time = get_working_time_ms(ctx);
+        // Calculate expected time for current segment
+        uint16_t distance_cm;
+        if (ctx->current_static_point == 0) {
+            if (ctx->current_pkg->STATE == RISING) {
+                distance_cm = abs(ctx->current_pkg->end_depth - ctx->sorted_static_points[0]);
+            } else {
+                distance_cm = ctx->sorted_static_points[0];
+            }
+        } else {
+            distance_cm = abs(ctx->sorted_static_points[ctx->current_static_point] - 
+                           ctx->sorted_static_points[ctx->current_static_point - 1]);
+        }
         
-        if (elapsed_time >= expected_time) {
-            ESP_LOGI(TAG, "Reached static point %d/%d (time-based)", 
-                     ctx->current_static_point + 1, ctx->num_points);
+        uint32_t expected_time = calculate_expected_time_ms(distance_cm, 
+                                                          ctx->validated_speed_cm_per_s_x1000);
+        
+        // FIX: Use time in current state, not total working time!
+        uint32_t elapsed_in_state = timer_ms_since_start(&ctx->operation_timer) - 
+                                   ctx->state_start_time_ms;
+        
+        if (elapsed_in_state >= expected_time) {
+            ESP_LOGI(TAG, "Reached static point %d/%d (time-based: %lums >= %lums)", 
+                     ctx->current_static_point + 1, ctx->num_points,
+                     elapsed_in_state, expected_time);
             return true;
         }
     }
