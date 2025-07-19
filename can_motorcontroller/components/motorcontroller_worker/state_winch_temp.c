@@ -377,19 +377,17 @@ static winch_state_t transition_to_state(winch_state_t new_state) {
     ESP_LOGI(TAG, "State transition: %s -> %s", 
              state_name(g_ctx.current_state), state_name(new_state));
     
-    // Exit current state (with null check)
+    // Exit current state (with null check so we dont die)
     if (state_handlers[g_ctx.current_state].on_exit) {
         state_handlers[g_ctx.current_state].on_exit(&g_ctx);
     }
     
-    // Update state
     g_ctx.previous_state = g_ctx.current_state;
     g_ctx.current_state = new_state;
     
     // Record when this state started (relative to operation timer)
     g_ctx.state_start_time_ms = timer_ms_since_start(&g_ctx.operation_timer);
     
-    // Update lamps for new state
     update_lamps_for_state(new_state);
     
     // Enter new state (with null check)
@@ -1472,7 +1470,6 @@ static bool should_go_to_static_wait(const winch_state_context_t *ctx) {
         uint32_t expected_time = calculate_expected_time_ms(distance_cm, 
                                                           ctx->validated_speed_cm_per_s_x1000);
         
-        // FIX: Use time in current state, not total working time!
         uint32_t elapsed_in_state = timer_ms_since_start(&ctx->operation_timer) - 
                                    ctx->state_start_time_ms;
         
