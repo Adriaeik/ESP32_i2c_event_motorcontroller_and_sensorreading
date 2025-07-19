@@ -734,11 +734,11 @@ static winch_state_t static_wait_event(winch_state_context_t *ctx, winch_event_t
                 if (ctx->current_pkg->STATE == RISING) {
                     return WS_MOVING_UP; // Continue to home
                 } else {
-                    return WS_COMPLETE;
+                    return WS_MOVING_DOWN;
                 }
             } else {
                 // Move to next static point
-                return get_next_movement_state(ctx);
+                return WS_STATIC_MOVING_TO_POINT;
             }
             
         default:
@@ -1146,9 +1146,13 @@ static uint32_t calculate_state_timeout(const winch_state_context_t *ctx) {
         case WS_MOVING_DOWN:
         case WS_MOVING_UP:
         case WS_STATIC_MOVING_TO_POINT:
-            timeout_ms = calculate_movement_timeout(ctx);
-            // Don't log here - already logged in calculate_movement_timeout
-            return timeout_ms;
+            // Calculate distance between current and next static point
+            uint16_t prev_point = (ctx->current_static_point == 0) 
+                ? ctx->current_pkg->end_depth 
+                : ctx->sorted_static_points[ctx->current_static_point - 1];
+            
+            uint16_t distance = abs(prev_point - ctx->sorted_static_points[ctx->current_static_point]);
+            return calculate_expected_time_ms(distance, ctx->validated_speed_cm_per_s_x1000);
             
         case WS_INIT_GOING_HOME:
             // For INIT: different timeouts for down vs up phase
