@@ -53,6 +53,7 @@ typedef enum {
 #define RECOVERY_PAUSE_TIME_MS 1000
 #define TENSION_REVERSE_TIME_MS 1000
 #define TENSION_RECOVERY_PAUSE_MS 500
+#define MIN_TRAVEL_PERCENT_BEFOR_HOME_SENSOR_IS_ACTIVE 50 // 0 - 100 
 
 // State machine specific timeouts
 #define STATIC_WAIT_BUFFER_MS 1000
@@ -132,13 +133,15 @@ typedef struct {
     motorcontroller_response_t *current_resp;
     uint16_t validated_speed_cm_per_s_x1000;   // Validated speed from pkg (scaled by 1000)
     
-    // Timers
-    w_timer_t operation_timer;
-    w_timer_t state_timer;              // Timer for current state
-    w_timer_t recovery_timer;           // Separate timer for recovery tracking
+    // Timers - simplified approach
+    w_timer_t operation_timer;          // Started once, never restarted
+    w_timer_t recovery_timer;           // For tracking individual recovery phases
+    w_timer_t static_timer;             // For tracking individual static wait phases
     
+    // Time tracking for working time calculation
     uint32_t total_recovery_time_ms;
     uint32_t total_static_wait_time_ms;
+    uint32_t state_start_time_ms;       // When current state started (relative to operation_timer)
     
     // Static depth handling
     uint8_t current_static_point;
@@ -152,7 +155,7 @@ typedef struct {
     
     // State management
     bool operation_active;
-    QueueHandle_t event_queue;
+    QueueHandle_t input_queue;
     
     // Current direction (for logging state changes)
     winch_direction_t current_direction;
@@ -232,35 +235,37 @@ static winch_state_t init_going_home_event(winch_state_context_t *ctx, winch_eve
 static winch_state_t static_moving_to_point_enter(winch_state_context_t *ctx);
 static winch_state_t static_moving_to_point_event(winch_state_context_t *ctx, winch_event_t event);
 
-// Helper functions
-static winch_event_data_t wait_for_event_with_timeout(uint32_t timeout_ms);
-static void set_winch_direction(winch_direction_t direction);
-static uint32_t calculate_state_timeout(winch_state_context_t *ctx);
-static uint32_t calculate_movement_timeout(winch_state_context_t *ctx);
-static esp_err_t setup_operation_for_mode(winch_state_context_t *ctx);
-static winch_state_t get_next_movement_state(winch_state_context_t *ctx);
-static bool should_go_to_static_wait(winch_state_context_t *ctx);
-static uint32_t calculate_expected_time_ms(uint16_t distance_cm, uint16_t speed_cm_per_s_x1000);
-static uint16_t validate_speed_estimate(uint16_t estimated_cm_per_s_x1000);
-static const char* state_name(winch_state_t state);
-static const char* event_name(winch_event_t event);
-static const char* direction_to_string(winch_direction_t direction);
+// Home sensor protection functions
+static void track_upward_movement_start(winch_state_context_t *ctx);
+static void calculate_minimum_return_time_from_distance(winch_state_context_t *ctx);
 
-// Time formatting helper
-static void format_time_string(uint32_t time_ms, char *buffer, size_t buffer_size);
+// Lamp control functions
+static void update_lamps_for_state(const winch_state_t state);
+static void set_operation_lamps(const lamp_state_t mode);
 
 // Static point validation and sanitization
 static uint8_t validate_and_sanitize_static_points(const motorcontroller_pkg_t *pkg, 
                                                    uint16_t *sanitized_points, 
                                                    uint8_t max_points);
 
-// Home sensor protection functions
-static void track_upward_movement_start(winch_state_context_t *ctx);
-static void calculate_minimum_return_time_from_distance(winch_state_context_t *ctx);
+// Helper functions
+static winch_event_data_t wait_for_event_with_timeout(const uint32_t timeout_ms);
+static void set_winch_direction(const winch_direction_t direction);
+static uint32_t calculate_state_timeout(const winch_state_context_t *ctx);
+static uint32_t calculate_movement_timeout(const winch_state_context_t *ctx);
+static esp_err_t setup_operation_for_mode(winch_state_context_t *ctx);
+static winch_state_t get_next_movement_state(const winch_state_context_t *ctx);
+static bool should_go_to_static_wait(const winch_state_context_t *ctx);
+static uint32_t calculate_expected_time_ms(uint16_t distance_cm, uint16_t speed_cm_per_s_x1000);
+static uint32_t get_working_time_ms(const winch_state_context_t *ctx);
+static uint16_t validate_speed_estimate(const uint16_t estimated_cm_per_s_x1000);
+static const char* state_name(const winch_state_t state);
+static const char* event_name(const winch_event_t event);
+static const char* direction_to_string(const winch_direction_t direction);
 
-// Lamp control functions
-static void update_lamps_for_state(winch_state_t state);
-static void set_operation_lamps(lamp_state_t mode);
+// Time formatting helper
+static void format_time_string(const uint32_t time_ms, char *buffer, const size_t buffer_size);
+
 
 // ============================================================================
 // STATE TRANSITION TABLE
@@ -381,6 +386,9 @@ static winch_state_t transition_to_state(winch_state_t new_state) {
     g_ctx.previous_state = g_ctx.current_state;
     g_ctx.current_state = new_state;
     
+    // Record when this state started (relative to operation timer)
+    g_ctx.state_start_time_ms = timer_ms_since_start(&g_ctx.operation_timer);
+    
     // Update lamps for new state
     update_lamps_for_state(new_state);
     
@@ -393,8 +401,6 @@ static winch_state_t transition_to_state(winch_state_t new_state) {
         }
     }
     
-    // Start state timer
-    timer_start(&g_ctx.state_timer);
     return new_state;
 }
 
@@ -432,7 +438,23 @@ static esp_err_t run_state_machine(void) {
     // Main state machine loop
     while (g_ctx.operation_active) {
         uint32_t timeout = calculate_state_timeout(&g_ctx);
-        winch_event_data_t event_data = wait_for_event_with_timeout(timeout);
+        uint32_t elapsed_in_state = timer_ms_since_start(&g_ctx.operation_timer) - g_ctx.state_start_time_ms;
+        uint32_t remaining_timeout = (timeout > elapsed_in_state) ? (timeout - elapsed_in_state) : 0;
+        
+        // If we've already exceeded the timeout, generate timeout event immediately
+        if (remaining_timeout == 0) {
+            winch_state_t new_state = process_event(WE_TIMEOUT);
+            if (new_state == WS_COMPLETE) {
+                g_ctx.current_resp->result = ESP_OK;
+                break;
+            } else if (new_state == WS_ERROR) {
+                g_ctx.current_resp->result = ESP_FAIL;
+                break;
+            }
+            continue; // Check again with new state
+        }
+        
+        winch_event_data_t event_data = wait_for_event_with_timeout(remaining_timeout);
         
         winch_state_t new_state = process_event(event_data.event);
         
@@ -449,18 +471,22 @@ static esp_err_t run_state_machine(void) {
     // Final cleanup
     set_winch_direction(WINCH_STOP);
     
+    // Calculate working time: total time minus recovery and static wait time
+    uint32_t working_time_ms = get_working_time_ms(&g_ctx);
+    
     // Fill response
-    uint32_t total_time = timer_ms_since_start(&g_ctx.operation_timer);
-    uint32_t working_time = total_time - g_ctx.total_recovery_time_ms - g_ctx.total_static_wait_time_ms;
-    g_ctx.current_resp->working_time = working_time / 1000;
+    g_ctx.current_resp->working_time = working_time_ms / 1000; // Convert to seconds
     g_ctx.current_resp->estimated_cm_per_s = g_ctx.validated_speed_cm_per_s_x1000;
     
-    char total_time_str[64], working_time_str[64];
-    format_time_string(total_time, total_time_str, sizeof(total_time_str));
-    format_time_string(working_time, working_time_str, sizeof(working_time_str));
+    char total_time_str[64], working_time_str[64], recovery_time_str[64], static_time_str[64];
+    format_time_string(timer_ms_since_start(&g_ctx.operation_timer), total_time_str, sizeof(total_time_str));
+    format_time_string(working_time_ms, working_time_str, sizeof(working_time_str));
+    format_time_string(g_ctx.total_recovery_time_ms, recovery_time_str, sizeof(recovery_time_str));
+    format_time_string(g_ctx.total_static_wait_time_ms, static_time_str, sizeof(static_time_str));
     
     ESP_LOGI(TAG, "State machine completed - Result: %s", esp_err_to_name(g_ctx.current_resp->result));
-    ESP_LOGI(TAG, "  Total time: %s, Working time: %s", total_time_str, working_time_str);
+    ESP_LOGI(TAG, "  Total: %s, Working: %s, Recovery: %s, Static: %s", 
+             total_time_str, working_time_str, recovery_time_str, static_time_str);
     
     return g_ctx.current_resp->result;
 }
@@ -647,6 +673,14 @@ static winch_state_t moving_up_event(winch_state_context_t *ctx, winch_event_t e
             return WS_ERROR;
             
         case WE_TIMEOUT:
+            if (ctx->current_pkg->poll_type == STATIC_DEPTH && 
+                ctx->current_static_point == 0 &&
+                ctx->current_pkg->end_depth == ctx->sorted_static_points[0]) 
+            {
+                ESP_LOGI(TAG, "Already at first static point (%d cm), starting static wait", 
+                         ctx->sorted_static_points[0]);
+                return WS_STATIC_WAIT;
+            }
             ESP_LOGI(TAG, "MOVING_UP timeout - checking completion conditions");
             
             // Check if we should go to static wait first
@@ -655,13 +689,7 @@ static winch_state_t moving_up_event(winch_state_context_t *ctx, winch_event_t e
                 return WS_STATIC_WAIT;
             }
             
-            // For ALPHA_DEPTH rising operations, timeout means we've reached home
-            if (ctx->current_pkg->poll_type == ALPHA_DEPTH) {
-                ESP_LOGI(TAG, "ALPHA_DEPTH rising complete - reached home position");
-                return WS_COMPLETE;
-            }
-            
-            // For other poll types (like LIN_TIME), timeout during rising triggers recovery
+            // For timeout during rising we triggers recovery
             ESP_LOGW(TAG, "Timeout during rising operation - starting recovery");
             return WS_TIMEOUT_RECOVERY_DOWN;
             
@@ -678,7 +706,7 @@ static winch_state_t static_wait_enter(winch_state_context_t *ctx) {
     set_winch_direction(WINCH_STOP);
     
     // Start tracking static wait time
-    timer_start(&ctx->state_timer);
+    timer_start(&ctx->static_timer);
     
     ESP_LOGI(TAG, "Static wait at point %d/%d (depth %d cm)", 
              ctx->current_static_point + 1, ctx->num_points,
@@ -721,7 +749,12 @@ static winch_state_t static_wait_event(winch_state_context_t *ctx, winch_event_t
 
 static void static_wait_exit(winch_state_context_t *ctx) {
     // Add static wait time to exclusion total
-    ctx->total_static_wait_time_ms += timer_ms_since_start(&ctx->state_timer);
+    uint32_t static_wait_time = timer_ms_since_start(&ctx->static_timer);
+    ctx->total_static_wait_time_ms += static_wait_time;
+    
+    char time_str[64];
+    format_time_string(static_wait_time, time_str, sizeof(time_str));
+    ESP_LOGD(TAG, "Static wait complete, added %s to static wait time", time_str);
 }
 
 static winch_state_t complete_enter(winch_state_context_t *ctx) {
@@ -776,8 +809,13 @@ static winch_state_t tension_recovery_reverse_event(winch_state_context_t *ctx, 
             return WS_ERROR;
             
         case WE_TENSION_CLEARED:
-            // Resume original operation
-            ctx->total_recovery_time_ms += timer_ms_since_start(&ctx->recovery_timer);
+            // Resume original operation - add recovery time to total
+            uint32_t recovery_time = timer_ms_since_start(&ctx->recovery_timer);
+            ctx->total_recovery_time_ms += recovery_time;
+            
+            char time_str[64];
+            format_time_string(recovery_time, time_str, sizeof(time_str));
+            ESP_LOGI(TAG, "Tension recovery complete, added %s to recovery time", time_str);
             return get_next_movement_state(ctx);
             
         case WE_TIMEOUT:
@@ -785,7 +823,12 @@ static winch_state_t tension_recovery_reverse_event(winch_state_context_t *ctx, 
             if (inputs_get_winch_tension()) {
                 return WS_ERROR; // Still have tension
             } else {
-                ctx->total_recovery_time_ms += timer_ms_since_start(&ctx->recovery_timer);
+                uint32_t recovery_time = timer_ms_since_start(&ctx->recovery_timer);
+                ctx->total_recovery_time_ms += recovery_time;
+                
+                char time_str[64];
+                format_time_string(recovery_time, time_str, sizeof(time_str));
+                ESP_LOGI(TAG, "Tension recovery timeout, added %s to recovery time", time_str);
                 return get_next_movement_state(ctx);
             }
             
@@ -920,8 +963,8 @@ static winch_state_t init_going_home_event(winch_state_context_t *ctx, winch_eve
                 ESP_LOGI(TAG, "INIT: Down phase complete, now going up to find home");
                 set_winch_direction(WINCH_UP);
                 track_upward_movement_start(ctx);
-                // Restart timer for the upward phase with long timeout
-                timer_start(&ctx->state_timer);
+                // Record when the UP phase started (don't restart timers!)
+                ctx->state_start_time_ms = timer_ms_since_start(&ctx->operation_timer);
                 return WS_INIT_GOING_HOME; // Stay in same state but now going up
             } else {
                 // We've been going up and timed out
@@ -976,7 +1019,7 @@ static winch_state_t static_moving_to_point_event(winch_state_context_t *ctx, wi
 // HELPER FUNCTIONS
 // ============================================================================
 
-static winch_event_data_t wait_for_event_with_timeout(uint32_t timeout_ms) {
+static winch_event_data_t wait_for_event_with_timeout(const uint32_t timeout_ms) {
     InputEvent input_event;
     winch_event_data_t event_data = {
         .event = WE_NO_EVENT,
@@ -985,70 +1028,71 @@ static winch_event_data_t wait_for_event_with_timeout(uint32_t timeout_ms) {
     };
     
     // SAFETY CHECK: If queue is NULL, stop motors and force error
-    if (g_ctx.event_queue == NULL) {
+    if (g_ctx.input_queue == NULL) {
         ESP_LOGE(TAG, "💥 CRITICAL: Event queue is NULL! Stopping motors for safety!");
         set_winch_direction(WINCH_STOP);
         event_data.event = WE_AUTO_DISABLED;  // Force error state
         return event_data;
     }
     
-    if (xQueueReceive(g_ctx.event_queue, &input_event, pdMS_TO_TICKS(timeout_ms)) == pdTRUE) {
+    if (xQueueReceive(g_ctx.input_queue, &input_event, pdMS_TO_TICKS(timeout_ms)) == pdTRUE) {
         // Convert input event to winch event
         switch (input_event.event_type) {
             case HOME:
                 if (input_event.state) {
                     // Only generate HOME_REACHED when in states that care about home position
-                    // and when moving UP (not down)
+                    // and when moving UP (not down) - maybe make a function of this?
                     bool is_upward_state = (g_ctx.current_state == WS_MOVING_UP ||
-                                          g_ctx.current_state == WS_TIMEOUT_RECOVERY_UP ||
-                                          g_ctx.current_state == WS_INIT_GOING_HOME ||
-                                          (g_ctx.current_state == WS_TENSION_RECOVERY_REVERSE && 
-                                           g_ctx.current_direction == WINCH_UP));
+                                            g_ctx.current_state == WS_TIMEOUT_RECOVERY_UP ||
+                                            g_ctx.current_state == WS_INIT_GOING_HOME ||
+                                          ((g_ctx.current_state == WS_STATIC_MOVING_TO_POINT ||
+                                            g_ctx.current_state == WS_TENSION_RECOVERY_REVERSE) && 
+                                            g_ctx.current_direction == WINCH_UP));
                     
                     if (is_upward_state) {
                         // For INIT and RECOVERY operations, allow home sensor at any time (unknown starting position)
-                        if (g_ctx.current_state == WS_INIT_GOING_HOME) {
-                            event_data.event = WE_HOME_REACHED;
-                            event_data.edge_detected = input_event.edge_detected;
-                            ESP_LOGI(TAG, "INIT: HOME sensor accepted (no time restrictions for INIT)");
-                        } else if (g_ctx.current_state == WS_TIMEOUT_RECOVERY_UP) {
-                            event_data.event = WE_HOME_REACHED;
-                            event_data.edge_detected = input_event.edge_detected;
-                            ESP_LOGI(TAG, "RECOVERY: HOME sensor accepted immediately (recovery priority)");
-                        } else if (g_ctx.current_state == WS_TENSION_RECOVERY_REVERSE && 
-                                  g_ctx.current_direction == WINCH_UP) {
-                            event_data.event = WE_HOME_REACHED;
-                            event_data.edge_detected = input_event.edge_detected;
-                            ESP_LOGI(TAG, "TENSION_RECOVERY: HOME sensor accepted immediately (recovery priority)");
-                        } else {
-                            // Protect against false home sensor triggers for normal operations only
-                            uint32_t current_time = timer_ms_since_start(&g_ctx.operation_timer);
-                            uint32_t upward_time = current_time - g_ctx.upward_movement_start_time_ms;
-                            
-                            // Check minimum upward time
-                            bool min_time_ok = (upward_time >= MIN_UPWARD_TIME_FOR_HOME_MS);
-                            
-                            // Check estimated minimum return time (if we have downward movement data)
-                            bool min_return_time_ok = true;
-                            if (g_ctx.estimated_min_return_time_ms > 0) {
-                                min_return_time_ok = (upward_time >= g_ctx.estimated_min_return_time_ms);
-                            }
-                            
-                            if (min_time_ok && min_return_time_ok) {
+                        switch (g_ctx.current_state){
+                            case WS_INIT_GOING_HOME:
+                            case WS_TIMEOUT_RECOVERY_UP:
                                 event_data.event = WE_HOME_REACHED;
                                 event_data.edge_detected = input_event.edge_detected;
-                                char upward_time_str[64];
-                                format_time_string(upward_time, upward_time_str, sizeof(upward_time_str));
-                                ESP_LOGI(TAG, "NORMAL_OP: HOME sensor accepted after %s upward movement", upward_time_str);
-                            } else {
-                                char upward_time_str[64], min_time_str[64], est_time_str[64];
-                                format_time_string(upward_time, upward_time_str, sizeof(upward_time_str));
-                                format_time_string(MIN_UPWARD_TIME_FOR_HOME_MS, min_time_str, sizeof(min_time_str));
-                                format_time_string(g_ctx.estimated_min_return_time_ms, est_time_str, sizeof(est_time_str));
-                                ESP_LOGW(TAG, "NORMAL_OP: HOME sensor IGNORED - too early! Upward: %s, Min: %s, Est: %s", 
-                                         upward_time_str, min_time_str, est_time_str);
+                                ESP_LOGI(TAG, "HOME sensor accepted (no time restrictions for)");
+                                break;
+                            case WS_TENSION_RECOVERY_REVERSE:
+                                if (g_ctx.current_direction == WINCH_UP) {
+                                    event_data.event = WE_HOME_REACHED;
+                                    event_data.edge_detected = input_event.edge_detected;
+                                    ESP_LOGI(TAG, "TENSION_RECOVERY: HOME sensor accepted immediately (recovery priority)");
+                                    break;
+                                } // else go to default                        
+                            default:
+                                // Protect against false home sensor triggers for normal operations only
+                                uint32_t upward_time = get_working_time_ms(&g_ctx);
+                                uint32_t min_active_time = g_ctx.estimated_min_return_time_ms;
+                                bool min_return_time_ok = true;
+                                if (min_active_time > 0) {
+                                    min_return_time_ok = (upward_time >= min_active_time);
+                                }
+                                if ( min_return_time_ok) {
+                                    event_data.event = WE_HOME_REACHED;
+                                    event_data.edge_detected = input_event.edge_detected;
+                                    char upward_time_str[64];
+                                    format_time_string(upward_time, upward_time_str, sizeof(upward_time_str));
+                                    ESP_LOGI(TAG, "NORMAL_OP: HOME sensor accepted after %s upward movement", upward_time_str);
+                                } else {
+                                    char upward_time_str[64], est_time_str[64];
+                                    format_time_string(upward_time, upward_time_str, sizeof(upward_time_str));
+                                    format_time_string(min_active_time, est_time_str, sizeof(est_time_str));
+                                    ESP_LOGW(TAG, "NORMAL_OP: HOME sensor IGNORED - too early! Upward: %s, min time: %s", 
+                                            upward_time_str, est_time_str);
+                                }
+                                break;
                             }
-                        }
+                    } else{
+                        char time_str[64];
+                        format_time_string(get_working_time_ms(&g_ctx), time_str, sizeof(time_str));
+                         ESP_LOGW(TAG, "NORMAL_OP: HOME sensor IGNORED - we are going down! current working time: %s", 
+                                            time_str);
                     }
                     // Ignore HOME events when moving down or in wrong states
                 }
@@ -1083,7 +1127,7 @@ static void set_winch_direction(winch_direction_t direction) {
     outputs_set_winch_up(direction == WINCH_UP);
 }
 
-static uint32_t calculate_state_timeout(winch_state_context_t *ctx) {
+static uint32_t calculate_state_timeout(const winch_state_context_t *ctx) {
     uint32_t timeout_ms = 0;
     char time_str[64];
     
@@ -1143,7 +1187,7 @@ static uint32_t calculate_state_timeout(winch_state_context_t *ctx) {
     }
 }
 
-static winch_state_t get_next_movement_state(winch_state_context_t *ctx) {
+static winch_state_t get_next_movement_state(const winch_state_context_t *ctx) {
     ESP_LOGD(TAG, "Determining next movement state for %s", state_to_string(ctx->current_pkg->STATE));
     
     switch (ctx->current_pkg->STATE) {
@@ -1172,17 +1216,17 @@ esp_err_t winch_controller_init(void) {
     outputs_init();
     
     // Create event queue  
-    g_ctx.event_queue = xQueueCreate(10, sizeof(InputEvent));
-    if (!g_ctx.event_queue) {
+    g_ctx.input_queue = xQueueCreate(10, sizeof(InputEvent));
+    if (!g_ctx.input_queue) {
         return ESP_ERR_NO_MEM;
     }
     
-    inputs_init(g_ctx.event_queue);
+    inputs_init(g_ctx.input_queue);
     
     // Initialize state machine - PRESERVE queue handle!
-    QueueHandle_t temp_queue = g_ctx.event_queue;  // Save queue handle
+    QueueHandle_t temp_queue = g_ctx.input_queue;  // Save queue handle
     memset(&g_ctx, 0, sizeof(winch_state_context_t));
-    g_ctx.event_queue = temp_queue;  // Restore queue handle
+    g_ctx.input_queue = temp_queue;  // Restore queue handle
     g_ctx.current_state = WS_IDLE;
     g_ctx.current_direction = WINCH_INVALID;
     
@@ -1206,9 +1250,9 @@ esp_err_t winch_controller_deinit(void) {
     inputs_deinit();
     outputs_deinit();
     
-    if (g_ctx.event_queue) {
-        vQueueDelete(g_ctx.event_queue);
-        g_ctx.event_queue = NULL;
+    if (g_ctx.input_queue) {
+        vQueueDelete(g_ctx.input_queue);
+        g_ctx.input_queue = NULL;
     }
     
     g_controller_initialized = false;
@@ -1223,7 +1267,7 @@ esp_err_t winch_execute_operation(const motorcontroller_pkg_t *pkg, motorcontrol
     }
     
     // SAFETY CHECK: Verify event queue is valid before starting operation
-    if (g_ctx.event_queue == NULL) {
+    if (g_ctx.input_queue == NULL) {
         ESP_LOGE(TAG, "💥 CRITICAL: Event queue is NULL! Cannot start operation safely!");
         set_winch_direction(WINCH_STOP);
         if (resp) {
@@ -1270,7 +1314,7 @@ esp_err_t winch_execute_operation(const motorcontroller_pkg_t *pkg, motorcontrol
 
 esp_err_t winch_go_to_home_position(void) {
     // SAFETY CHECK: Verify system is properly initialized
-    if (!g_controller_initialized || g_ctx.event_queue == NULL) {
+    if (!g_controller_initialized || g_ctx.input_queue == NULL) {
         ESP_LOGE(TAG, "💥 CRITICAL: Winch controller not properly initialized! Cannot go home safely!");
         set_winch_direction(WINCH_STOP);
         return ESP_ERR_INVALID_STATE;
@@ -1339,12 +1383,13 @@ static esp_err_t setup_operation_for_mode(winch_state_context_t *ctx) {
         
         // Sort based on direction
         if (pkg->STATE == RISING) {
-            // For RISING: reverse order so we go from deepest to shallowest
-            for (int i = 0; i < ctx->num_points / 2; i++) {
-                uint16_t temp = ctx->sorted_static_points[i];
-                ctx->sorted_static_points[i] = ctx->sorted_static_points[ctx->num_points - 1 - i];
-                ctx->sorted_static_points[ctx->num_points - 1 - i] = temp;
+            // FIXED: Create temporary reversed array
+            uint16_t reversed_points[MAX_POINTS];
+            for (int i = 0; i < ctx->num_points; i++) {
+                reversed_points[i] = ctx->sorted_static_points[ctx->num_points - 1 - i];
             }
+            // Copy reversed points back to original array
+            memcpy(ctx->sorted_static_points, reversed_points, ctx->num_points * sizeof(uint16_t));
             
             ESP_LOGI(TAG, "STATIC_DEPTH RISING: %d valid points configured, starting from %d cm", 
                      ctx->num_points, pkg->end_depth);
@@ -1357,6 +1402,7 @@ static esp_err_t setup_operation_for_mode(winch_state_context_t *ctx) {
             ESP_LOGI(TAG, "  -> 0 cm (home)");
             
         } else {
+            // No reversal needed for lowering (points already in ascending order)
             ESP_LOGI(TAG, "STATIC_DEPTH LOWERING: %d valid points configured, ending at %d cm", 
                      ctx->num_points, pkg->end_depth);
             
@@ -1374,18 +1420,23 @@ static esp_err_t setup_operation_for_mode(winch_state_context_t *ctx) {
     return ESP_OK;
 }
 
+static uint32_t get_working_time_ms(const winch_state_context_t *ctx){
+    // Calculate working time: total time minus recovery and static wait time
+    uint32_t total_time_ms = timer_ms_since_start(&ctx->operation_timer);
+    return total_time_ms - ctx->total_recovery_time_ms - ctx->total_static_wait_time_ms;
+}
+
 // Helper to check if we should transition to static wait
-static bool should_go_to_static_wait(winch_state_context_t *ctx) {
+static bool should_go_to_static_wait(const winch_state_context_t *ctx) {
     if (ctx->current_pkg->poll_type != STATIC_DEPTH) {
         return false;
     }
-    
     // Check if we've reached the current target static point
     if (ctx->current_static_point < ctx->num_points) {
-        // For now, we'll use timeout as indication we reached the point
-        // This is the same logic as your original implementation
-        uint32_t expected_time = calculate_movement_timeout(ctx);
-        uint32_t elapsed_time = timer_ms_since_start(&ctx->state_timer);
+        uint32_t expected_time = calculate_expected_time_ms(abs(ctx->sorted_static_points[ctx->current_static_point] - 
+                                                                ctx->current_target_depth), 
+                                                            ctx->validated_speed_cm_per_s_x1000);
+        uint32_t elapsed_time = get_working_time_ms(ctx);
         
         if (elapsed_time >= expected_time) {
             ESP_LOGI(TAG, "Reached static point %d/%d (time-based)", 
@@ -1398,9 +1449,9 @@ static bool should_go_to_static_wait(winch_state_context_t *ctx) {
 }
 
 // Calculate timeout for current operation
-static uint32_t calculate_movement_timeout(winch_state_context_t *ctx) {
+static uint32_t calculate_movement_timeout(const winch_state_context_t *ctx) {
     const motorcontroller_pkg_t *pkg = ctx->current_pkg;
-    uint32_t calculated_timeout = 0;
+    uint32_t calculated_timeout = 0; //ms
     char time_str[64];
     
     switch (pkg->poll_type) {
@@ -1465,7 +1516,7 @@ static uint32_t calculate_movement_timeout(winch_state_context_t *ctx) {
 }
 
 // Time calculation with clear units and scaling
-static uint32_t calculate_expected_time_ms(uint16_t distance_cm, uint16_t speed_cm_per_s_x1000) {
+static uint32_t calculate_expected_time_ms(const uint16_t distance_cm, const uint16_t speed_cm_per_s_x1000) {
     if (speed_cm_per_s_x1000 == 0) {
         ESP_LOGW(TAG, "⚠️  Speed is 0, using default timeout");
         return DEFAULT_MOVING_TIMEOUT_MS;
@@ -1479,15 +1530,7 @@ static uint32_t calculate_expected_time_ms(uint16_t distance_cm, uint16_t speed_
     uint32_t time_ms = (distance_cm * 1000UL * 1000UL) / speed_cm_per_s_x1000;
     
     // Add compensation for motor start/stop delays
-    uint32_t total_time_ms = time_ms + SOFT_START_STOP_COMPENSATION_MS;
-    
-    // Only log detailed calculation at DEBUG level to reduce spam
-    char time_str[64];
-    format_time_string(total_time_ms, time_str, sizeof(time_str));
-    
-    ESP_LOGD(TAG, "🧮 Time calc: (%d cm * 1000 * 1000) / %d + %d = %s", 
-             distance_cm, speed_cm_per_s_x1000, SOFT_START_STOP_COMPENSATION_MS, time_str);
-    
+    uint32_t total_time_ms = time_ms + SOFT_START_STOP_COMPENSATION_MS;    
     return total_time_ms;
 }
 
@@ -1641,7 +1684,7 @@ static const char* direction_to_string(winch_direction_t direction) {
 // ============================================================================
 
 static void track_upward_movement_start(winch_state_context_t *ctx) {
-    ctx->upward_movement_start_time_ms = timer_ms_since_start(&ctx->operation_timer);
+    ctx->upward_movement_start_time_ms = get_working_time_ms(ctx) - timer_ms_since_start(&ctx->operation_timer); // zero if no recowery happend
     ESP_LOGD(TAG, "Tracking upward movement start at %d ms", ctx->upward_movement_start_time_ms);
 }
 
@@ -1654,24 +1697,23 @@ static void calculate_minimum_return_time_from_distance(winch_state_context_t *c
     if (pkg->STATE == RISING && pkg->end_depth > 0 && ctx->validated_speed_cm_per_s_x1000 > 0) {
         // For RISING: end_depth is starting depth, distance is end_depth -> 0 (home)
         travel_distance_cm = pkg->end_depth;
-        
+        uint32_t calculated_time_ms = calculate_expected_time_ms(travel_distance_cm, ctx->validated_speed_cm_per_s_x1000);
+        uint16_t depth = pkg->end_depth;
+        if (g_ctx.current_pkg->poll_type == LIN_TIME){
+            calculated_time_ms = g_ctx.current_pkg->static_poll_interval_s*1000;
+            depth = calculated_time_ms*ctx->validated_speed_cm_per_s_x1000/1000;
+        } 
         // Conservative estimate: assume upward movement takes 20% longer than calculated
         // due to load or different motor characteristics
-        uint32_t calculated_time_ms = calculate_expected_time_ms(travel_distance_cm, ctx->validated_speed_cm_per_s_x1000);
-        ctx->estimated_min_return_time_ms = (calculated_time_ms * 8) / 10;  // 80% of calculated time
-        
-        // But never less than our absolute minimum
-        if (ctx->estimated_min_return_time_ms < MIN_UPWARD_TIME_FOR_HOME_MS) {
-            ctx->estimated_min_return_time_ms = MIN_UPWARD_TIME_FOR_HOME_MS;
-        }
+        ctx->estimated_min_return_time_ms = (calculated_time_ms * MIN_TRAVEL_PERCENT_BEFOR_HOME_SENSOR_IS_ACTIVE) / 100; 
         
         char time_str[64];
         format_time_string(ctx->estimated_min_return_time_ms, time_str, sizeof(time_str));
         ESP_LOGI(TAG, "🛡️  Home sensor protection: %s (from %d cm at %.3f cm/s)", 
-                 time_str, pkg->end_depth, ctx->validated_speed_cm_per_s_x1000 / 1000.0);
+                 time_str, depth, ctx->validated_speed_cm_per_s_x1000 / 1000.0);
     } else {
         // No distance or speed info, use default minimum
-        ctx->estimated_min_return_time_ms = MIN_UPWARD_TIME_FOR_HOME_MS;
+        ctx->estimated_min_return_time_ms = 0;
         ESP_LOGD(TAG, "No distance/speed info or not rising operation, using default minimum return time");
     }
 }

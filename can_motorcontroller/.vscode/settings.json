@@ -53,7 +53,8 @@
     "outputs.h": "c",
     "inputs.h": "c",
     "rtc_manager.h": "c",
-    "esp_random.h": "c"
+    "esp_random.h": "c",
+    "timer.h": "c"
   },
   "idf.flashType": "UART",
   "idf.portWin": "COM15"

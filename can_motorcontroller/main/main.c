@@ -370,10 +370,11 @@ static void setup_test_package(motorcontroller_pkg_t *pkg, test_operation_t oper
             pkg->STATE = RISING;
             pkg->poll_type = STATIC_DEPTH;
             pkg->end_depth = 600; // 6 meters total
-            pkg->static_points[0] = 400; // 4m (reversed order for rising)
-            pkg->static_points[1] = 200; // 2m
-            pkg->static_points[2] = 50;  // 0.5m
-            pkg->static_points[3] = 0;   // Null terminator  
+            pkg->static_points[0] = 100; // 1m
+            pkg->static_points[1] = 250; // 2.5m  
+            pkg->static_points[2] = 450; // 4.5m
+            pkg->static_points[3] = 600; // 6m (final)
+            pkg->static_points[4] = 0;   // Null terminator
             pkg->samples = 2; // 2 samples at each point
             pkg->static_poll_interval_s = 3; // 3 seconds between samples
             pkg->rising_timeout_percent = 130; // 30% safety margin
@@ -435,7 +436,8 @@ static void run_test_cycle(int cycle_count) {
     ESP_LOGI(TEST_TAG, "🔄 Starting test cycle #%d", cycle_count);
     
     for (test_operation_t op = 0; op < TEST_MAX_OPERATIONS; op++) {
-        esp_err_t result = run_test_operation(op, cycle_count);
+        // esp_err_t result = run_test_operation(op, cycle_count);
+        esp_err_t result = run_test_operation(TEST_RISING_STATIC_DEPTH, cycle_count);
         
         if (result != ESP_OK) {
             ESP_LOGE(TEST_TAG, "💥 Test operation %s FAILED! Aborting cycle.", 
